@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -23,9 +24,10 @@ type FileInfo struct {
 }
 
 type entry struct {
-	info  FileInfo
-	tasks []Task
-	err   string
+	info    FileInfo
+	tasks   []Task
+	err     string
+	retryAt time.Time // for unreadable files: when to try again
 }
 
 // Index keeps the parsed tasks of every .txt file under a root, re-parsing only changed files.
@@ -61,12 +63,23 @@ type found struct {
 	rel, abs, stamp string
 }
 
-// listFiles walks root for .txt notes: it skips hidden folders, symlinked/junction folders (loops),
-// oversized files and anything past MaxFiles.
+// maxVisited bounds how many directory entries one scan may look at, so choosing a huge folder
+// (a whole drive) cannot make every scan walk the machine.
+const maxVisited = 50000
+
+// listFiles walks root for .txt notes. It skips hidden/system folders, symlinked folders, oversized
+// files and anything past MaxFiles. Cloud-sync placeholder files (OneDrive, Dropbox) report an
+// unusual file type on Windows, so files are only excluded when they are clearly not files.
 func listFiles(root string) (files []found, truncated bool) {
 	if root == "" {
 		return nil, false
 	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root
+	}
+	seenDirs := map[string]bool{}
+	visited := 0
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -74,18 +87,38 @@ func listFiles(root string) (files []found, truncated bool) {
 			}
 			return nil
 		}
+		if visited++; visited > maxVisited {
+			truncated = true
+			return fs.SkipAll
+		}
 		name := d.Name()
 		if d.IsDir() {
-			if p != root && (strings.HasPrefix(name, ".") || d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0) {
+			if p == root {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") || d.Type()&fs.ModeSymlink != 0 {
 				return fs.SkipDir
+			}
+			if fi, err := d.Info(); err != nil || hiddenOrSystem(fi) {
+				return fs.SkipDir
+			}
+			if d.Type()&fs.ModeIrregular != 0 { // mount point / reparse folder: descend once, never in a loop
+				real, err := filepath.EvalSymlinks(p)
+				if err != nil || !within(realRoot, real) || seenDirs[real] {
+					return fs.SkipDir
+				}
+				seenDirs[real] = true
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || strings.HasPrefix(name, ".") || !strings.EqualFold(filepath.Ext(name), ".txt") {
+		if d.Type()&(fs.ModeSymlink|fs.ModeDevice|fs.ModeNamedPipe|fs.ModeSocket) != 0 {
+			return nil
+		}
+		if strings.HasPrefix(name, ".") || !strings.EqualFold(filepath.Ext(name), ".txt") {
 			return nil
 		}
 		fi, err := d.Info()
-		if err != nil || fi.Size() > MaxFileBytes {
+		if err != nil || fi.IsDir() || fi.Size() > MaxFileBytes {
 			return nil
 		}
 		if len(files) >= MaxFiles {
@@ -102,38 +135,70 @@ func listFiles(root string) (files []found, truncated bool) {
 	return files, truncated
 }
 
-// Scan brings the index up to date and reports whether anything changed.
+func within(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func parseEntry(f found) *entry {
+	e := &entry{info: FileInfo{Path: f.rel, Stamp: f.stamp}}
+	file, err := ReadFileTries(f.abs, 2) // the scanner never waits long; it tries again next time
+	if err != nil {
+		e.err = err.Error()
+		e.info.Problem = "cannot be read"
+		e.retryAt = time.Now().Add(5 * time.Second)
+		return e
+	}
+	e.tasks = ParseTasks(file.Text, f.rel)
+	e.info.Problem = file.Problem
+	for _, t := range e.tasks {
+		if !t.Done {
+			e.info.OpenTasks++
+		}
+	}
+	return e
+}
+
+// Scan brings the index up to date and reports whether anything changed. Files are read without
+// holding the index lock, so a slow or locked file never stalls requests.
 func (ix *Index) Scan() (changed bool) {
 	root := ix.Root()
 	files, truncated := listFiles(root)
+
+	ix.mu.RLock()
+	var todo []found
+	now := time.Now()
+	for _, f := range files {
+		e, ok := ix.entries[f.rel]
+		if !ok || e.info.Stamp != f.stamp || (e.err != "" && now.After(e.retryAt)) {
+			todo = append(todo, f)
+		}
+	}
+	ix.mu.RUnlock()
+
+	parsed := make(map[string]*entry, len(todo))
+	for _, f := range todo {
+		parsed[f.rel] = parseEntry(f)
+	}
 
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if ix.root != root { // folder switched while scanning
 		return false
 	}
+	for rel, e := range parsed {
+		old, had := ix.entries[rel]
+		if !had || old.info.Stamp != e.info.Stamp || (old.err == "") != (e.err == "") || old.info.Problem != e.info.Problem {
+			changed = true
+		}
+		ix.entries[rel] = e
+	}
 	seen := make(map[string]bool, len(files))
 	for _, f := range files {
 		seen[f.rel] = true
-		if e, ok := ix.entries[f.rel]; ok && e.info.Stamp == f.stamp {
-			continue
-		}
-		changed = true
-		e := &entry{info: FileInfo{Path: f.rel, Stamp: f.stamp}}
-		file, err := ReadFile(f.abs)
-		if err != nil {
-			e.err = err.Error()
-			e.info.Problem = "cannot be read"
-		} else {
-			e.tasks = ParseTasks(file.Text, f.rel)
-			e.info.Problem = file.Problem
-			for _, t := range e.tasks {
-				if !t.Done {
-					e.info.OpenTasks++
-				}
-			}
-		}
-		ix.entries[f.rel] = e
 	}
 	for rel := range ix.entries {
 		if !seen[rel] {
@@ -155,7 +220,11 @@ func (ix *Index) Scan() (changed bool) {
 // (coarse file-system timestamps could otherwise hide a same-size edit).
 func (ix *Index) Forget(rel string) {
 	ix.mu.Lock()
-	delete(ix.entries, rel)
+	for k := range ix.entries {
+		if strings.EqualFold(k, rel) {
+			delete(ix.entries, k)
+		}
+	}
 	ix.mu.Unlock()
 }
 

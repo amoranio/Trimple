@@ -30,6 +30,22 @@ func attachConsoleIfAny() {
 	}
 }
 
+var setStdHandle = kernel32.NewProc("SetStdHandle")
+
+// ensureStderr points stderr at the log file when the process has none (windowless exe), so that a
+// crash leaves a stack trace behind instead of vanishing.
+func ensureStderr(f *os.File) {
+	if f == nil {
+		return
+	}
+	if _, err := os.Stderr.Stat(); err == nil {
+		return
+	}
+	const stdErrorHandle = ^uintptr(11) // (DWORD)-12
+	setStdHandle.Call(stdErrorHandle, f.Fd())
+	os.Stderr = f
+}
+
 func showError(title, msg string) {
 	t, _ := syscall.UTF16PtrFromString(title)
 	m, _ := syscall.UTF16PtrFromString(msg)

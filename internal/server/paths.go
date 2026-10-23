@@ -10,7 +10,7 @@ import (
 
 var errBadPath = errors.New("invalid path")
 
-var reserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true}
+var reserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true, "CONIN$": true, "CONOUT$": true}
 
 func isReservedName(name string) bool {
 	base := strings.ToUpper(name)
@@ -21,8 +21,11 @@ func isReservedName(name string) bool {
 	if reserved[base] {
 		return true
 	}
-	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
-		return true
+	if r := []rune(base); len(r) == 4 && (string(r[:3]) == "COM" || string(r[:3]) == "LPT") {
+		switch r[3] {
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9', '\u00b9', '\u00b2', '\u00b3': // Windows also treats superscript digits as device numbers
+			return true
+		}
 	}
 	return false
 }
@@ -40,6 +43,9 @@ func validRel(rel string) error {
 		switch part {
 		case ".", "..":
 			return fmt.Errorf("%w: %q not allowed", errBadPath, part)
+		}
+		if len(part) > 255 {
+			return fmt.Errorf("%w: a name is too long", errBadPath)
 		}
 		if strings.ContainsAny(part, `<>:"|?*`) {
 			return fmt.Errorf("%w: %q has characters Windows does not allow", errBadPath, part)
@@ -123,4 +129,21 @@ func relOf(root, abs string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+// validNote additionally requires a visible .txt note: the API only ever reads, ticks, saves or
+// hands to Notepad plain notes, never other files that happen to sit in the folder (.git, scripts ...).
+func validNote(rel string) error {
+	if err := validRel(rel); err != nil {
+		return err
+	}
+	if !strings.EqualFold(filepath.Ext(rel), ".txt") {
+		return fmt.Errorf("%w: only .txt notes are supported", errBadPath)
+	}
+	for _, part := range strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if strings.HasPrefix(part, ".") {
+			return fmt.Errorf("%w: hidden names are not notes", errBadPath)
+		}
+	}
+	return nil
 }

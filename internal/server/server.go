@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -78,7 +79,7 @@ func New(o Options) (*Server, error) {
 		o.Logf = func(string, ...any) {}
 	}
 	if o.Grace <= 0 {
-		o.Grace = 20 * time.Second
+		o.Grace = 60 * time.Second
 	}
 	if o.StartupWait <= 0 {
 		o.StartupWait = 2 * time.Minute
@@ -138,7 +139,10 @@ func (s *Server) Handler() http.Handler { return s.routes() }
 
 // Run serves until ctx is cancelled or Quit is called (or the window has been closed).
 func (s *Server) Run(ctx context.Context) error {
-	s.httpSrv = &http.Server{Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	s.httpSrv = &http.Server{
+		Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
+		ErrorLog: log.New(logWriter{s.opts.Logf}, "http: ", 0), // handler panics land in the log file
+	}
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.ln) }()
 	go s.scanLoop(ctx)
@@ -150,6 +154,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-s.quit:
 	case err = <-errc:
 	}
+	s.Quit() // lets long-lived event streams return so Shutdown is quick
 	sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = s.httpSrv.Shutdown(sctx)
@@ -241,6 +246,24 @@ func (s *Server) scanNow() {
 
 func (s *Server) root() string { return s.idx.Root() }
 
+type logWriter struct{ logf func(string, ...any) }
+
+func (w logWriter) Write(p []byte) (int, error) {
+	w.logf("%s", strings.TrimSpace(string(p)))
+	return len(p), nil
+}
+
+// touch counts a request from a (re)starting window as activity, so a second launch just before the
+// idle timeout does not land on a server that is about to quit.
+func (s *Server) touch() {
+	s.cliMu.Lock()
+	if s.clients == 0 {
+		s.lastLeave = time.Now()
+		s.everConnected = true
+	}
+	s.cliMu.Unlock()
+}
+
 // ---------------------------------------------------------------- routing and guards
 
 func (s *Server) routes() http.Handler {
@@ -258,7 +281,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/resolve", s.handleResolve)
 	mux.HandleFunc("/api/quit", s.handleQuit)
-	mux.Handle("/", http.FileServer(http.FS(web.Files)))
+	mux.Handle("/", staticHandler())
 	return s.guard(mux)
 }
 
@@ -347,11 +370,27 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		fail(w, http.StatusBadRequest, "bad_request", "invalid request: "+err.Error())
 		return false
 	}
-	if dec.More() {
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
 		fail(w, http.StatusBadRequest, "bad_request", "invalid request: trailing data")
 		return false
 	}
 	return true
+}
+
+// staticHandler serves the embedded UI with explicit content types (the registry-based defaults on
+// Windows can be wrong, and nosniff is on).
+func staticHandler() http.Handler {
+	fsrv := http.FileServer(http.FS(web.Files))
+	types := map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if t, ok := types[strings.ToLower(filepath.Ext(r.URL.Path))]; ok {
+			w.Header().Set("Content-Type", t)
+		} else if r.URL.Path == "/" {
+			w.Header().Set("Content-Type", types[".html"])
+		}
+		fsrv.ServeHTTP(w, r)
+	})
 }
 
 func method(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
@@ -365,7 +404,12 @@ func method(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
 	return false
 }
 
+// resolve maps a client path to a file under the notes folder; notes=true also requires a visible .txt.
 func (s *Server) resolve(w http.ResponseWriter, rel string) (string, bool) {
+	if err := validNote(rel); err != nil {
+		fail(w, http.StatusBadRequest, "bad_path", err.Error())
+		return "", false
+	}
 	abs, err := safeJoin(s.root(), rel)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_path", err.Error())
@@ -380,10 +424,17 @@ var eolValues = map[string]string{"crlf": "\r\n", "lf": "\n", "cr": "\r"}
 // ---------------------------------------------------------------- handlers
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
+	s.touch()
 	writeJSON(w, http.StatusOK, map[string]string{"app": "trimple", "version": Version})
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
 	s.mu.RLock()
 	st := s.settings
 	s.mu.RUnlock()
@@ -430,14 +481,14 @@ type fileResp struct {
 }
 
 type putFile struct {
-	Path         string `json:"path"`
-	Text         string `json:"text"`
-	Kind         string `json:"kind"`
-	EOL          string `json:"eol"`
-	ExpectedHash string `json:"expectedHash"`
-	Create       bool   `json:"create"`
-	Overwrite    bool   `json:"overwrite"`
-	AllowUpgrade bool   `json:"allowUpgrade"`
+	Path         string  `json:"path"`
+	Text         *string `json:"text"` // required: a missing text must never wipe a note
+	Kind         string  `json:"kind"`
+	EOL          string  `json:"eol"`
+	ExpectedHash string  `json:"expectedHash"`
+	Create       bool    `json:"create"`
+	Overwrite    bool    `json:"overwrite"`
+	AllowUpgrade bool    `json:"allowUpgrade"`
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -477,25 +528,34 @@ func (s *Server) putFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !strings.EqualFold(filepath.Ext(abs), ".txt") {
-		fail(w, http.StatusBadRequest, "bad_path", "only .txt notes can be saved")
+	if req.Text == nil {
+		fail(w, http.StatusBadRequest, "bad_request", "text is required")
 		return
 	}
-	if strings.ContainsRune(req.Text, 0) {
+	text := *req.Text
+	if strings.ContainsRune(text, 0) {
 		fail(w, http.StatusBadRequest, "bad_text", "NUL characters cannot be saved")
 		return
 	}
-	eol, ok := eolValues[req.EOL]
-	if !ok {
-		eol = "\r\n"
+	if len(text) > notes.MaxFileBytes {
+		fail(w, http.StatusRequestEntityTooLarge, "too_large", "notes over 5 MB are not supported")
+		return
 	}
-	kind := notes.Kind(req.Kind)
-	switch kind {
-	case notes.UTF8, notes.UTF8BOM, notes.UTF16LE, notes.UTF16BE, notes.ANSI:
+	var kind notes.Kind
+	switch notes.Kind(req.Kind) {
+	case "", notes.UTF8, notes.UTF8BOM, notes.UTF16LE, notes.UTF16BE, notes.ANSI:
+		kind = notes.Kind(req.Kind)
 	default:
-		kind = notes.UTF8
+		fail(w, http.StatusBadRequest, "bad_request", "unknown kind")
+		return
+	}
+	eol, eolGiven := eolValues[req.EOL]
+	if req.EOL != "" && !eolGiven {
+		fail(w, http.StatusBadRequest, "bad_request", "unknown eol")
+		return
 	}
 
+	defer notes.LockPath(abs)() // read-check-write must be atomic with respect to ticks and other saves
 	var current *notes.File
 	if _, err := os.Stat(abs); err == nil {
 		cur, err := notes.ReadFile(abs)
@@ -512,12 +572,28 @@ func (s *Server) putFile(w http.ResponseWriter, r *http.Request) {
 	case current != nil && !current.Lossless:
 		fail(w, http.StatusConflict, "readonly", "that file "+current.Problem+", so Trimple will not rewrite it")
 		return
+	case !req.Create && !req.Overwrite && current != nil && req.ExpectedHash == "":
+		fail(w, http.StatusBadRequest, "bad_request", "expectedHash is required when saving an existing note")
+		return
 	case !req.Create && current != nil && req.ExpectedHash != "" && current.Hash != req.ExpectedHash && !req.Overwrite:
 		fail(w, http.StatusConflict, "changed", "the file was changed outside Trimple")
 		return
 	}
+	// Anything not stated keeps what the file already has; a new note defaults to UTF-8 / Windows line ends.
+	if kind == "" {
+		kind = notes.UTF8
+		if current != nil {
+			kind = current.Kind
+		}
+	}
+	if !eolGiven {
+		eol = "\r\n"
+		if current != nil {
+			eol = current.EOL
+		}
+	}
 
-	data, usedKind := notes.Encode(notes.ApplyEOL(req.Text, eol), kind)
+	data, usedKind := notes.Encode(notes.ApplyEOL(text, eol), kind)
 	if usedKind != kind && !req.AllowUpgrade {
 		fail(w, http.StatusConflict, "encoding", "the text contains characters the file's old ANSI encoding cannot store")
 		return
@@ -582,6 +658,10 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	abs, ok := s.resolve(w, req.Path)
 	if !ok {
+		return
+	}
+	if req.Raw == nil { // without it a tick could land on whatever line now has that number
+		fail(w, http.StatusBadRequest, "bad_request", "raw is required")
 		return
 	}
 	err := notes.SetTaskDone(abs, req.Line, req.Done, req.Raw)
@@ -688,6 +768,10 @@ func (s *Server) handleFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := filepath.Clean(req.Path)
+	if filepath.Dir(p) == p {
+		fail(w, http.StatusBadRequest, "bad_path", "choose a folder, not a whole drive")
+		return
+	}
 	created := false
 	if !notes.Exists(p) {
 		if !req.Create {
@@ -772,6 +856,9 @@ func (s *Server) handleQuit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, http.StatusInternalServerError, "sse", "streaming not supported")

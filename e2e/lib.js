@@ -162,6 +162,15 @@ async function ready(page) {
   await page.waitForFunction(() => window.__trimpleReady === true, null, { timeout: 15000 });
 }
 
+/** Like ready(), but works around the known startup race (see 12d): reloads until the page reaches ready. */
+async function readyWithRetries(page, tries = 10) {
+  for (let i = 1; i <= tries; i++) {
+    try { await page.waitForFunction(() => window.__trimpleReady === true, null, { timeout: 2500 }); return i; }
+    catch (_) { await page.reload(); }
+  }
+  throw new Error('page never became ready after ' + tries + ' loads');
+}
+
 // ---------------------------------------------------------------- page helpers
 const tasksText = (page) => page.$$eval('#tasklist li.task', (l) => l.map((li) => li.querySelector('.ttext').textContent));
 const groupNames = (page) => page.$$eval('#tasklist li.group', (l) => l.map((li) => li.children[0].textContent + '|' + li.children[1].textContent));
@@ -207,6 +216,7 @@ function eolCounts(buf) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 module.exports = {
+  readyWithRetries,
   REPO, SAMPLE, TOKEN, RESULTS, WIN, binary, mkTmp, copyFixture, startApp, rawRequest, launchBrowser, openPage, ready,
   tasksText, groupNames, fileNames, tabNames, status, editorState, activeTa, taskRow, modal, waitFor, diffBytes, eolCounts, sleep,
 };

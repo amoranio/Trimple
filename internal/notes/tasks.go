@@ -168,6 +168,7 @@ func ParseTasks(text, relPath string) []Task {
 // line endings and every other byte are written back exactly as they were. It refuses when the
 // file cannot be rewritten losslessly or when the line is not what the caller last saw.
 func SetTaskDone(path string, line int, done bool, expectedRaw *string) error {
+	defer LockPath(path)()
 	f, err := ReadFile(path)
 	if err != nil {
 		return err

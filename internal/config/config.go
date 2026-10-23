@@ -89,6 +89,7 @@ func Load(path string) Settings {
 
 // Save writes the settings atomically.
 func Save(path string, s Settings) error {
+	defer notes.LockPath(path)()
 	s.Sanitize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

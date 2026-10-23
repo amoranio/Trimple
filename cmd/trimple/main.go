@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ type instanceInfo struct {
 
 func main() { os.Exit(run()) }
 
-func run() int {
+func run() (code int) {
 	attachConsoleIfAny()
 	var (
 		folder    = flag.String("folder", "", "notes folder for this run (default: the saved one)")
@@ -44,7 +45,7 @@ func run() int {
 		port      = flag.Int("port", defaultPort, "preferred port on 127.0.0.1 (falls back to any free port)")
 		cfgPath   = flag.String("config", "", "settings file (default: %AppData%\\Trimple\\settings.json)")
 		token     = flag.String("token", "", "fixed access token (testing only)")
-		grace     = flag.Duration("grace", 20*time.Second, "exit this long after the last window closes")
+		grace     = flag.Duration("grace", time.Minute, "exit this long after the last window closes")
 		noSingle  = flag.Bool("no-single-instance", false, "always start a new server")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
@@ -65,7 +66,24 @@ func run() int {
 	}
 	cfgDir := filepath.Dir(cfg)
 	_ = os.MkdirAll(cfgDir, 0o755)
-	logf := newLogger(filepath.Join(cfgDir, "trimple.log"))
+	// Machine-specific state (log, running-instance info) belongs in the local, non-roaming folder.
+	stateDir := cfgDir
+	if *cfgPath == "" {
+		if c, err := os.UserCacheDir(); err == nil && c != "" {
+			stateDir = filepath.Join(c, "Trimple")
+			_ = os.MkdirAll(stateDir, 0o755)
+		}
+	}
+	logPath := filepath.Join(stateDir, "trimple.log")
+	logf, logFile := newLogger(logPath)
+	ensureStderr(logFile) // a windowless exe has no stderr; send panics to the log
+	defer func() {
+		if r := recover(); r != nil {
+			logf("panic: %v\n%s", r, debug.Stack())
+			showError("Trimple", fmt.Sprintf("Trimple hit an unexpected error and has to close.\n\n%v\n\nDetails: %s", r, logPath))
+			code = 2
+		}
+	}()
 
 	tok := *token
 	if tok == "" {
@@ -76,7 +94,7 @@ func run() int {
 		tok = hex.EncodeToString(b)
 	}
 
-	instPath := filepath.Join(cfgDir, "instance.json")
+	instPath := filepath.Join(stateDir, "instance.json")
 	if !*noSingle && !*noBrowser {
 		if info, ok := liveInstance(instPath); ok {
 			u := fmt.Sprintf("http://127.0.0.1:%d/?t=%s%s", info.Port, info.Token, openParams(*folder, flag.Args()))
@@ -100,7 +118,7 @@ func run() int {
 	}
 	if !*noSingle {
 		writeInstance(instPath, instanceInfo{Port: srv.Port(), Token: tok, PID: os.Getpid()})
-		defer os.Remove(instPath)
+		defer removeInstance(instPath) // only if it is still ours
 	}
 
 	u := srv.URL() + openParams("", flag.Args())
@@ -153,6 +171,13 @@ func liveInstance(path string) (instanceInfo, bool) {
 	return info, resp.StatusCode == http.StatusOK && strings.Contains(string(body), `"trimple"`)
 }
 
+func removeInstance(path string) {
+	var info instanceInfo
+	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &info) == nil && info.PID == os.Getpid() {
+		_ = os.Remove(path)
+	}
+}
+
 func writeInstance(path string, info instanceInfo) {
 	b, _ := json.Marshal(info)
 	_ = os.WriteFile(path, b, 0o600)
@@ -165,7 +190,7 @@ func fatal(logf func(string, ...any), msg string) int {
 }
 
 // newLogger logs to a file next to the settings (and to the console when there is one).
-func newLogger(path string) func(string, ...any) {
+func newLogger(path string) (func(string, ...any), *os.File) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() > 512<<10 {
 		_ = os.Remove(path)
 	}
@@ -175,6 +200,8 @@ func newLogger(path string) func(string, ...any) {
 		if f != nil {
 			_, _ = f.WriteString(line)
 		}
-		fmt.Fprint(os.Stderr, line)
-	}
+		if os.Stderr != f {
+			fmt.Fprint(os.Stderr, line)
+		}
+	}, f
 }
