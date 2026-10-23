@@ -146,6 +146,7 @@ $script:Busy      = $false
 $script:Headless  = $false
 $script:Untitled  = 0
 $script:LastUiError = $null
+$script:LastLogMessage = ''
 $script:ThemeName = 'dark'
 
 $script:ThemeDefs = @{
@@ -170,8 +171,12 @@ function Write-TrimpleLog {
     try {
         $dir = $script:AppRoot
         if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { $dir = [System.IO.Path]::GetTempPath() }
+        if ($Message -eq $script:LastLogMessage) { return }
+        $script:LastLogMessage = $Message
+        $file = Join-Path $dir 'Trimple.log'
+        if ((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -gt 262144) { Remove-Item -LiteralPath $file -Force }
         $line = '{0:s}  {1}{2}' -f (Get-Date), $Message, [Environment]::NewLine
-        [System.IO.File]::AppendAllText((Join-Path $dir 'Trimple.log'), $line)
+        [System.IO.File]::AppendAllText($file, $line)
     }
     catch { }
 }
@@ -353,7 +358,7 @@ function Get-LineOffset {
     $offset = 0
     $current = 1
     while ($current -lt $Line) {
-        $i = $Text.IndexOf("`n", $offset)
+        $i = $Text.IndexOf([char]10, $offset)
         if ($i -lt 0) { return $Text.Length }
         $offset = $i + 1
         $current++
@@ -364,7 +369,7 @@ function Get-LineOffset {
 # ------------------------------------------------------------------ documents
 
 function New-Doc {
-    param([string]$Path = '', [string]$Text = '', [string]$Kind = 'utf8', [string]$Eol = "`r`n")
+    param([string]$Path = '', [string]$Text = '', [string]$Kind = 'utf8', [string]$Eol = "`r`n", $File = $null)
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.Multiline = $true
     $tb.AcceptsTab = $true
@@ -386,11 +391,12 @@ function New-Doc {
 
     $doc = @{
         Path = $Path; Name = $name; Kind = $Kind; Eol = $Eol; Editor = $tb
-        Dirty = $false; Stamp = ''; SeenStamp = ''; Conflict = ''; Loading = $true
+        Dirty = $false; Stamp = ''; SeenStamp = ''; Conflict = ''; Loading = $true; ReadOnly = $false; Problem = ''
         Rect = (New-Object System.Drawing.Rectangle(0, 0, 0, 0)); CloseRect = (New-Object System.Drawing.Rectangle(0, 0, 0, 0))
     }
     if ($Path) { $doc.Stamp = Get-FileStamp -Path $Path }
     $tb.Tag = $doc
+    if ($null -ne $File) { Set-DocProtection -Doc $doc -File $File; if (-not $File.Lossless) { $Text = $Text.Replace([string][char]0, '?') } }
     $tb.Text = ConvertTo-EditorText -Text $Text
     $doc.Loading = $false
 
@@ -434,8 +440,9 @@ function Open-Doc {
             [void](Show-Message -Text "Could not open '$full'.`n`n$($_.Exception.Message)" -Icon 'Warning')
             return $null
         }
-        $doc = New-Doc -Path $full -Text $file.Text -Kind $file.Kind -Eol $file.Eol
+        $doc = New-Doc -Path $full -Text $file.Text -Kind $file.Kind -Eol $file.Eol -File $file
         Remove-PristineUntitled -Except $doc
+        if ($doc.ReadOnly) { Set-Status ("'" + $doc.Name + "' " + $doc.Problem + ": opened read-only so Trimple cannot damage it. Use Notepad to edit it.") }
     }
     Show-Doc -Doc $doc
     if ($Line -gt 0) { Move-ToLine -Doc $doc -Line $Line }
@@ -490,12 +497,14 @@ function Close-Doc {
     param($Doc)
     if (-not (Confirm-SaveDoc -Doc $Doc)) { return $false }
     $idx = $script:Docs.IndexOf($Doc)
+    $wasActive = ($script:ActiveDoc -eq $Doc)
     Remove-DocCore -Doc $Doc
     if ($script:Docs.Count -eq 0) { [void](New-UntitledDoc) }
-    else {
+    elseif ($wasActive) {
         $next = [Math]::Min($idx, $script:Docs.Count - 1)
         Show-Doc -Doc $script:Docs[$next]
     }
+    else { Update-Chrome }
     return $true
 }
 
@@ -504,9 +513,11 @@ function Read-DocFromDisk {
     $file = Read-TrimpleFile -Path $Doc.Path
     $tb = $Doc.Editor
     $caret = $tb.SelectionStart
+    Set-DocProtection -Doc $Doc -File $file
     $Doc.Loading = $true
-    $tb.Text = ConvertTo-EditorText -Text $file.Text
+    $tb.Text = ConvertTo-EditorText -Text $(if ($file.Lossless) { $file.Text } else { $file.Text.Replace([string][char]0, '?') })
     $Doc.Loading = $false
+    $tb.ClearUndo()
     $Doc.Kind = $file.Kind
     $Doc.Eol = $file.Eol
     $Doc.Stamp = Get-FileStamp -Path $Doc.Path
@@ -515,12 +526,27 @@ function Read-DocFromDisk {
     $Doc.Conflict = ''
     $tb.SelectionStart = [Math]::Min($caret, $tb.TextLength)
     $tb.SelectionLength = 0
+    $tb.ScrollToCaret()
     Update-Chrome
+}
+
+# A file whose bytes would change when re-encoded (stray invalid bytes, NULs) opens read-only,
+# so that saving can never silently alter it.
+function Set-DocProtection {
+    param($Doc, $File)
+    $Doc.ReadOnly = (-not $File.Lossless)
+    $Doc.Problem = $File.Problem
+    $Doc.Editor.ReadOnly = $Doc.ReadOnly
 }
 
 function Save-Doc {
     param($Doc, [bool]$SaveAs = $false)
+    if ($Doc.ReadOnly) {
+        [void](Show-Message -Text "'$($Doc.Name)' $($Doc.Problem), so Trimple opened it read-only and will not write it.`n`nUse Notepad to edit this file." -Icon 'Warning')
+        return $false
+    }
     $path = $Doc.Path
+    if (-not $SaveAs -and $path -and -not $Doc.Dirty) { Set-Status 'No changes to save.'; return $true }   # never rewrite an untouched file
     if ($SaveAs -or -not $path) {
         $dlg = New-Object System.Windows.Forms.SaveFileDialog
         $dlg.Filter = 'Text files (*.txt)|*.txt|All files (*.*)|*.*'
@@ -529,9 +555,10 @@ function Save-Doc {
         if ($path) { $dlg.InitialDirectory = Split-Path -Parent $path; $dlg.FileName = [System.IO.Path]::GetFileName($path) }
         else { if ($script:Folder -and (Test-Path -LiteralPath $script:Folder)) { $dlg.InitialDirectory = $script:Folder }; $dlg.FileName = 'Notes.txt' }
         $script:Busy = $true
-        try { $r = $dlg.ShowDialog($script:ui.Form) } finally { $script:Busy = $false; $dlg.Dispose() }
+        $picked = ''
+        try { $r = $dlg.ShowDialog($script:ui.Form); $picked = $dlg.FileName } finally { $script:Busy = $false; $dlg.Dispose() }
         if ($r -ne [System.Windows.Forms.DialogResult]::OK) { return $false }
-        $path = $dlg.FileName
+        $path = $picked
     }
     elseif ($Doc.Path) {
         $disk = Get-FileStamp -Path $Doc.Path
@@ -543,6 +570,10 @@ function Save-Doc {
     try {
         $text = [regex]::Replace($Doc.Editor.Text, '\r\n|\n|\r', $Doc.Eol)
         $enc = ConvertTo-TrimpleBytes -Text $text -Kind $Doc.Kind
+        if ($Doc.Kind -eq 'ansi' -and $enc.Kind -ne 'ansi') {
+            $ans = Show-Message -Text "'$($Doc.Name)' uses the old ANSI encoding, but now contains characters it cannot store.`n`nSave it as UTF-8 instead? Accented letters already in the file are converted and will look the same in Notepad." -Buttons 'YesNo' -Icon 'Question'
+            if ($ans -ne 'Yes') { return $false }
+        }
         Write-TrimpleBytes -Path $path -Bytes $enc.Bytes
     }
     catch {
@@ -574,7 +605,7 @@ function Open-InNotepad {
         if ($r -eq 'Cancel') { return }
         if ($r -eq 'Yes' -and -not (Save-Doc -Doc $doc)) { return }
     }
-    try { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $doc.Path + '"') }
+    try { Start-Process -FilePath (Join-Path ([Environment]::SystemDirectory) 'notepad.exe') -ArgumentList ('"' + $doc.Path + '"') }
     catch { [void](Show-Message -Text "Could not start Notepad.`n`n$($_.Exception.Message)" -Icon 'Warning') }
 }
 
@@ -587,8 +618,8 @@ function Invoke-ToggleTaskOnLine {
     $text = $tb.Text
     $pos = $tb.SelectionStart
     $start = 0
-    if ($pos -gt 0) { $start = $text.LastIndexOf("`n", [Math]::Max($pos - 1, 0)) + 1 }
-    $end = $text.IndexOf("`r", $start)
+    if ($pos -gt 0) { $start = $text.LastIndexOf([char]10, [Math]::Max($pos - 1, 0)) + 1 }
+    $end = $text.IndexOf([char]13, $start)
     if ($end -lt 0) { $end = $text.Length }
     $line = $text.Substring($start, $end - $start)
     $m = [regex]::Match($line, '^(?<pre>[ \t]*[-*+][ \t]+\[)(?<mark>[ xX])(?<post>\][ \t]+\S)')
@@ -609,7 +640,7 @@ function Invoke-InsertTask {
     $text = $tb.Text
     $pos = $tb.SelectionStart
     $start = 0
-    if ($pos -gt 0) { $start = $text.LastIndexOf("`n", [Math]::Max($pos - 1, 0)) + 1 }
+    if ($pos -gt 0) { $start = $text.LastIndexOf([char]10, [Math]::Max($pos - 1, 0)) + 1 }
     $tb.SelectionStart = $start
     $tb.SelectionLength = 0
     $tb.SelectedText = '- [ ] '
@@ -624,7 +655,9 @@ function Update-Chrome {
     if ($null -eq $doc) { return }
     $mark = ''
     if ($doc.Dirty) { $mark = '*' }
-    $script:ui.Form.Text = "$mark$($doc.Name) - Trimple"
+    $ro = ''
+    if ($doc.ReadOnly) { $ro = ' [read-only]' }
+    $script:ui.Form.Text = "$mark$($doc.Name)$ro - Trimple"
     if ($doc.Conflict) {
         $script:ui.ConflictBar.Visible = $true
         if ($doc.Conflict -eq 'deleted') {
@@ -645,10 +678,16 @@ function Update-Position {
     $doc = $script:ActiveDoc
     if ($null -eq $doc) { return }
     $tb = $doc.Editor
-    $pos = [Math]::Min($tb.SelectionStart, $tb.TextLength)
-    $before = $tb.Text.Substring(0, $pos)
-    $lastBreak = $before.LastIndexOf("`n")
-    $line = ($before.Length - $before.Replace("`n", '').Length) + 1
+    $text = $tb.Text
+    $pos = [Math]::Min($tb.SelectionStart, $text.Length)
+    $line = 1
+    $lastBreak = -1
+    $i = 0
+    while ($i -lt $pos) {
+        $i = $text.IndexOf([char]10, $i, $pos - $i)
+        if ($i -lt 0) { break }
+        $line++; $lastBreak = $i; $i++
+    }
     $script:ui.StatusPos.Text = ('Ln {0}, Col {1}' -f $line, ($pos - $lastBreak))
 }
 
@@ -759,6 +798,7 @@ function Update-Panels {
     if ($Refresh -and $script:Folder) {
         $result = Update-TrimpleTaskIndex -Index $script:Index -Root $script:Folder
         if ($result.Errors.Count -gt 0) { Set-Status ("Skipped unreadable file: " + $result.Errors[0]) }
+        if ($result.Truncated) { Set-Status 'This folder has 2000+ .txt files; only the first 2000 are scanned. Pick a smaller folder (File > Open folder).' }
     }
     $all = @(Get-TrimpleIndexTasks -Index $script:Index)
     $script:Suppress = $true
@@ -857,7 +897,7 @@ function Draw-TaskRow {
             $g.FillRectangle($fill, $boxRect)
             $fill.Dispose()
             $tick = New-Object System.Drawing.Pen($c.Panel, [single]2)
-            $g.DrawLines($tick, @(
+            $g.DrawLines($tick, [System.Drawing.Point[]]@(
                 (New-Object System.Drawing.Point(($boxRect.Left + (S 3)), ($boxRect.Top + [int]($box / 2)))),
                 (New-Object System.Drawing.Point(($boxRect.Left + [int]($box / 2) - 1), ($boxRect.Bottom - (S 4)))),
                 (New-Object System.Drawing.Point(($boxRect.Right - (S 3)), ($boxRect.Top + (S 3))))))
@@ -954,12 +994,12 @@ function Invoke-TaskClick {
 # ------------------------------------------------------------------ folder + polling
 
 function Set-NotesFolder {
-    param([string]$Path)
+    param([string]$Path, [switch]$NoPersist, [switch]$NoRefresh)
     $script:Folder = $Path
-    $script:Settings.Folder = $Path
+    if (-not $NoPersist) { $script:Settings.Folder = $Path }
     $script:Index = @{}
     $script:ui.FolderLabel.Text = $Path
-    [void](Update-Panels -Refresh)
+    if (-not $NoRefresh) { [void](Update-Panels -Refresh) }
     Set-Status ("Notes folder: " + $Path)
 }
 
@@ -1017,14 +1057,15 @@ function Invoke-Poll {
     foreach ($doc in @($script:Docs)) {
         if (-not $doc.Path) { continue }
         $stamp = Get-FileStamp -Path $doc.Path
-        if ($stamp -eq $doc.Stamp -or $stamp -eq $doc.SeenStamp) { continue }
         if ($stamp -eq '') {
-            if ($doc.Conflict -ne 'deleted') { $doc.Conflict = 'deleted'; $doc.SeenStamp = $stamp }
+            if ($doc.Stamp -ne '' -and $doc.Conflict -ne 'deleted') { $doc.Conflict = 'deleted' }
             continue
         }
+        if ($doc.Conflict -eq 'deleted') { $doc.Conflict = '' }      # the file is back
+        if ($stamp -eq $doc.Stamp -or $stamp -eq $doc.SeenStamp) { continue }
         if (-not $doc.Dirty) {
             try { Read-DocFromDisk -Doc $doc; Set-Status ("Reloaded " + $doc.Name + " (changed outside Trimple)") }
-            catch { $doc.SeenStamp = $stamp }
+            catch { Write-TrimpleLog ("reload failed, will retry: " + $_.Exception.Message) }     # leave SeenStamp alone so the next tick retries
         }
         else { $doc.Conflict = 'changed'; $doc.SeenStamp = $stamp }
     }
@@ -1078,16 +1119,12 @@ function New-TrimpleUI {
     $split.Dock = 'Fill'
     $split.SplitterWidth = 3
     $split.FixedPanel = 'Panel1'
-    $split.Panel1MinSize = S 220
-    $split.Panel2MinSize = S 300
     $script:ui.Split = $split
 
     $left = New-Object System.Windows.Forms.SplitContainer
     $left.Dock = 'Fill'
     $left.Orientation = 'Horizontal'
     $left.SplitterWidth = 3
-    $left.Panel1MinSize = S 120
-    $left.Panel2MinSize = S 60
     $script:ui.LeftSplit = $left
     $split.Panel1.Controls.Add($left)
 
@@ -1213,8 +1250,10 @@ function New-TrimpleUI {
     $script:ui.MiWrap.Checked = [bool]$script:Settings.WordWrap
     $script:ui.MiDark = Add-MenuItem $mView '&Dark theme' 'Control, Shift, D' { if ($script:ThemeName -eq 'dark') { Set-Theme -Name 'light' } else { Set-Theme -Name 'dark' } }
     [void](Add-MenuItem $mView '-')
-    [void](Add-MenuItem $mView 'Font &larger' 'Control, Oemplus' { Set-FontSize -Size ($script:Settings.FontSize + 1) })
-    [void](Add-MenuItem $mView 'Font &smaller' 'Control, OemMinus' { Set-FontSize -Size ($script:Settings.FontSize - 1) })
+    $miBig = Add-MenuItem $mView 'Font &larger' 'Control, Oemplus' { Set-FontSize -Size ($script:Settings.FontSize + 1) }
+    $miBig.ShortcutKeyDisplayString = 'Ctrl++'
+    $miSmall = Add-MenuItem $mView 'Font &smaller' 'Control, OemMinus' { Set-FontSize -Size ($script:Settings.FontSize - 1) }
+    $miSmall.ShortcutKeyDisplayString = 'Ctrl+-'
     [void](Add-MenuItem $mView '&Reset font size' 'Control, D0' { Set-FontSize -Size 11 })
     [void](Add-MenuItem $mView '-')
     [void](Add-MenuItem $mView '&Next tab' 'Control, Tab' { Switch-Doc -Step 1 })
@@ -1277,10 +1316,12 @@ function New-TrimpleUI {
     $script:ui.Timer = $timer
 
     $form.Add_Shown({
-        try {
-            $script:ui.Split.SplitterDistance = S ([int]$script:Settings.PanelWidth)
-            $script:ui.LeftSplit.SplitterDistance = [int]($script:ui.LeftSplit.Height * 0.68)
-        } catch { }
+        # Minimum sizes can only be set once the containers have their real size.
+        try { $script:ui.Split.Panel1MinSize = S 220; $script:ui.Split.Panel2MinSize = S 300 } catch { }
+        try { $script:ui.LeftSplit.Panel1MinSize = S 120; $script:ui.LeftSplit.Panel2MinSize = S 60 } catch { }
+        try { $script:ui.Split.SplitterDistance = S ([int]$script:Settings.PanelWidth) } catch { }
+        try { $script:ui.LeftSplit.SplitterDistance = [int]($script:ui.LeftSplit.Height * 0.68) } catch { }
+        [void](Update-Panels -Refresh)
         [TrimpleNative]::SetCue($script:ui.Search.Handle, 'Search tasks')
         Apply-Theme
         $script:ui.Timer.Start()
@@ -1347,7 +1388,7 @@ function Initialize-TrimpleApp {
 
     $notes = Initialize-NotesFolder -Override $Folder
     Set-TaskPanelVisible -Visible ([bool]$script:Settings.TaskPanelVisible)
-    Set-NotesFolder -Path $notes
+    Set-NotesFolder -Path $notes -NoPersist:([bool]$Folder) -NoRefresh:(-not $Headless)
 
     $toOpen = New-Object System.Collections.Generic.List[string]
     foreach ($o in @($Open)) { if ($o) { $toOpen.Add($o) } }

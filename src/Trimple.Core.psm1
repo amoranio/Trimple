@@ -9,25 +9,41 @@ try { [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingPro
 $script:EolRegex  = '(\r\n|\n|\r)'
 $script:TaskRegex = [regex]'^(?<pre>[ \t]*[-*+][ \t]+\[)(?<mark>[ xX])(?<post>\][ \t]+)(?<body>.*)$'
 $script:PriorityRegex = [regex]'(?<!\S)!([1-3])(?!\S)'
-$script:LabelRegex    = [regex]'(?<!\S)#([\p{L}\p{N}_-]+)(?=$|[\s,;.!?)])'
+$script:LabelRegex    = [regex]'(?<!\S)#((?:\p{L}|[\uD800-\uDBFF][\uDC00-\uDFFF])(?:[\p{L}\p{N}\p{M}_-]|[\uD800-\uDBFF][\uDC00-\uDFFF])*)(?=$|[\s,;.!?)])'
+$script:FenceRegex    = [regex]'^\s*(?<f>`{3,}|~{3,})(?<rest>.*)$'
 
 # ---------------------------------------------------------------- encoding
 
 function Get-TrimpleAnsiEncoding {
-    try { return [System.Text.Encoding]::GetEncoding(1252) }
-    catch { return [System.Text.Encoding]::GetEncoding(28591) }
+    $cp = 0
+    try { $cp = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage } catch { }
+    if ($cp -le 0 -or $cp -eq 65001) { $cp = 1252 }
+    try { return [System.Text.Encoding]::GetEncoding($cp) } catch { }
+    try { return [System.Text.Encoding]::GetEncoding(1252) } catch { }
+    return [System.Text.Encoding]::GetEncoding(28591)
 }
 
 function Read-TrimpleBytes {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [int]$Retries = 4)
+    $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-    $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
-    try {
-        $ms = New-Object System.IO.MemoryStream
-        $fs.CopyTo($ms)
-        return ,$ms.ToArray()
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        try {
+            $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+            try {
+                $ms = New-Object System.IO.MemoryStream
+                $fs.CopyTo($ms)
+                return ,$ms.ToArray()
+            }
+            finally { $fs.Dispose() }
+        }
+        catch [System.IO.FileNotFoundException] { throw }
+        catch [System.IO.DirectoryNotFoundException] { throw }
+        catch [System.IO.IOException] {
+            if ($attempt -eq $Retries) { throw }
+            Start-Sleep -Milliseconds (100 * $attempt)
+        }
     }
-    finally { $fs.Dispose() }
 }
 
 # Returns @{ Text; Kind } where Kind is utf8 | utf8bom | utf16le | utf16be | ansi.
@@ -107,11 +123,21 @@ function Read-TrimpleFile {
     param([Parameter(Mandatory)][string]$Path)
     $bytes = Read-TrimpleBytes -Path $Path
     $dec = ConvertFrom-TrimpleBytes -Bytes $bytes
+    # Lossless = writing the text back gives exactly the bytes we read. When it does not (stray
+    # invalid bytes, NULs) the file must not be rewritten, or those bytes would be silently changed.
+    $back = ConvertTo-TrimpleBytes -Text $dec.Text -Kind $dec.Kind
+    $same = ($back.Kind -eq $dec.Kind -and $back.Bytes.Length -eq $bytes.Length)
+    if ($same) {
+        for ($i = 0; $i -lt $bytes.Length; $i++) { if ($back.Bytes[$i] -ne $bytes[$i]) { $same = $false; break } }
+    }
+    $hasNul = ($dec.Text.IndexOf([char]0) -ge 0)
     return [pscustomobject]@{
-        Path = $Path
-        Text = $dec.Text
-        Kind = $dec.Kind
-        Eol  = (Get-TrimpleDominantEol -Text $dec.Text)
+        Path     = $Path
+        Text     = $dec.Text
+        Kind     = $dec.Kind
+        Eol      = (Get-TrimpleDominantEol -Text $dec.Text)
+        Lossless = ($same -and -not $hasNul)
+        Problem  = $(if ($hasNul) { 'contains NUL characters' } elseif (-not $same) { 'contains bytes that are not valid for its encoding' } else { '' })
     }
 }
 
@@ -132,10 +158,21 @@ function Write-TrimpleBytes {
         [Parameter(Mandatory)][byte[]]$Bytes,
         [int]$Retries = 4
     )
+    $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.LinkType -eq 'SymbolicLink' -and $item.Target) {
+            $target = [string]@($item.Target)[0]
+            if (-not [System.IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $Path) $target }
+            $Path = [System.IO.Path]::GetFullPath($target)      # write through the link instead of replacing it
+        }
+    }
+    catch { }
     $tmp = $Path + '.trimple-tmp'
     for ($attempt = 1; $attempt -le $Retries; $attempt++) {
         try {
-            [System.IO.File]::WriteAllBytes($tmp, $Bytes)
+            $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $fs.Write($Bytes, 0, $Bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
             if (Test-Path -LiteralPath $Path) {
                 [System.IO.File]::Replace($tmp, $Path, [NullString]::Value)
             }
@@ -145,11 +182,20 @@ function Write-TrimpleBytes {
             return
         }
         catch [System.IO.IOException] {
+            # File.Replace can fail after it already removed the original: never delete the only copy.
+            if (-not (Test-Path -LiteralPath $Path) -and (Test-Path -LiteralPath $tmp)) {
+                [System.IO.File]::Move($tmp, $Path)
+                return
+            }
             if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
             if ($attempt -eq $Retries) { throw }
             Start-Sleep -Milliseconds (120 * $attempt)
         }
         catch {
+            if (-not (Test-Path -LiteralPath $Path) -and (Test-Path -LiteralPath $tmp)) {
+                [System.IO.File]::Move($tmp, $Path)
+                return
+            }
             if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
             throw
         }
@@ -187,8 +233,14 @@ function ConvertFrom-TrimpleTaskLine {
     )
     $m = $script:TaskRegex.Match($Line)
     if (-not $m.Success) { return $null }
-    if ($m.Groups['body'].Value.Trim().Length -eq 0) { return $null }
-    $body = ConvertFrom-TrimpleTaskBody -Body $m.Groups['body'].Value
+    $bodyText = $m.Groups['body'].Value
+    if ($bodyText.Trim().Length -eq 0) { return $null }
+    if ($bodyText.IndexOf('!') -ge 0 -or $bodyText.IndexOf('#') -ge 0) {
+        $body = ConvertFrom-TrimpleTaskBody -Body $bodyText
+    }
+    else {
+        $body = [pscustomobject]@{ Priority = 0; Labels = @(); Text = ([regex]::Replace($bodyText, '\s{2,}', ' ')).Trim() }
+    }
     return [pscustomobject]@{
         File     = $Path
         RelPath  = $RelPath
@@ -209,13 +261,22 @@ function Get-TrimpleTasksFromText {
     )
     $tasks = New-Object System.Collections.Generic.List[object]
     $parts = [regex]::Split($Text, $script:EolRegex)
-    $inFence = $false
+    $fence = ''
     $lineNo = 0
     for ($i = 0; $i -lt $parts.Length; $i += 2) {
         $lineNo++
         $line = $parts[$i]
-        if ($line -match '^\s*(```|~~~)') { $inFence = -not $inFence; continue }
-        if ($inFence) { continue }
+        $hasBracket = ($line.IndexOf('[') -ge 0)
+        if ($fence -ne '' -or $line.IndexOf('`') -ge 0 -or $line.IndexOf('~') -ge 0) {
+            $fm = $script:FenceRegex.Match($line)
+            if ($fm.Success) {
+                $f = $fm.Groups['f'].Value
+                if ($fence -eq '') { $fence = $f; continue }
+                if ($f[0] -eq $fence[0] -and $f.Length -ge $fence.Length -and $fm.Groups['rest'].Value.Trim().Length -eq 0) { $fence = ''; continue }
+            }
+            if ($fence -ne '') { continue }
+        }
+        if (-not $hasBracket) { continue }
         $t = ConvertFrom-TrimpleTaskLine -Line $line -Path $Path -RelPath $RelPath -LineNumber $lineNo
         if ($null -ne $t) { $tasks.Add($t) }
     }
@@ -232,6 +293,7 @@ function Set-TrimpleTaskState {
         [string]$ExpectedRaw
     )
     $file = Read-TrimpleFile -Path $Path
+    if (-not $file.Lossless) { throw "'$Path' $($file.Problem), so Trimple will not rewrite it. Edit it in Notepad instead." }
     $parts = [regex]::Split($file.Text, $script:EolRegex)
     $idx = 2 * ($Line - 1)
     if ($Line -lt 1 -or $idx -ge $parts.Length) { throw "Line $Line no longer exists in '$Path'. Refresh and try again." }
@@ -257,23 +319,38 @@ function Get-TrimpleFileList {
         [long]$MaxBytes = 5MB,
         [int]$MaxFiles = 2000
     )
-    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $Root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
     $found = New-Object System.Collections.Generic.List[object]
-    $items = Get-ChildItem -LiteralPath $Root -Filter '*.txt' -Recurse -File -ErrorAction SilentlyContinue
-    foreach ($f in $items) {
-        if ($f.Extension -ine '.txt') { continue }          # '*.txt' also matches '.txtx' style names
-        if ($f.Length -gt $MaxBytes) { continue }
-        $rel = $f.FullName.Substring([Math]::Min($rootFull.Length, $f.FullName.Length)).TrimStart('\', '/')
-        if ($rel -match '(^|[\\/])\.') { continue }          # hidden folders/files such as .git
-        $found.Add([pscustomobject]@{
-            Path    = $f.FullName
-            RelPath = $rel
-            Stamp   = ('{0}:{1}' -f $f.LastWriteTimeUtc.Ticks, $f.Length)
-        })
-        if ($found.Count -ge $MaxFiles) { break }
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($rootFull + [System.IO.Path]::DirectorySeparatorChar)
+    while ($stack.Count -gt 0 -and $found.Count -lt $MaxFiles) {
+        $dir = $stack.Pop()
+        try {
+            $di = New-Object System.IO.DirectoryInfo($dir)
+            $files = $di.GetFiles()                    # filtered by extension below (case-insensitive, no '.txtx' look-alikes)
+            $subs = $di.GetDirectories()
+        }
+        catch { continue }
+        foreach ($f in $files) {
+            if ($f.Extension -ine '.txt' -or $f.Name.StartsWith('.')) { continue }
+            if ($f.Length -gt $MaxBytes) { continue }
+            if ($found.Count -ge $MaxFiles) { break }
+            $rel = $f.FullName.Substring([Math]::Min($rootFull.Length, $f.FullName.Length)).TrimStart('\', '/')
+            $found.Add([pscustomobject]@{
+                Path    = $f.FullName
+                RelPath = $rel
+                Stamp   = ('{0}:{1}' -f $f.LastWriteTimeUtc.Ticks, $f.Length)
+            })
+        }
+        foreach ($d in $subs) {
+            if ($d.Name.StartsWith('.')) { continue }                                   # .git and friends
+            if (($d.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }   # junction/symlink loops
+            $stack.Push($d.FullName)
+        }
     }
-    return $found.ToArray()
+    return @($found.ToArray() | Sort-Object { $_.RelPath })
 }
 
 # Index: hashtable keyed by lower-case full path -> @{ Path; RelPath; Stamp; Tasks }.
@@ -287,7 +364,8 @@ function Update-TrimpleTaskIndex {
     $removed = New-Object System.Collections.Generic.List[string]
     $errors  = New-Object System.Collections.Generic.List[string]
     $seen = @{}
-    foreach ($f in (Get-TrimpleFileList -Root $Root)) {
+    $list = @(Get-TrimpleFileList -Root $Root)
+    foreach ($f in $list) {
         $key = $f.Path.ToLowerInvariant()
         $seen[$key] = $true
         $entry = $null
@@ -309,7 +387,7 @@ function Update-TrimpleTaskIndex {
             $Index.Remove($key)
         }
     }
-    return [pscustomobject]@{ Changed = $changed.ToArray(); Removed = $removed.ToArray(); Errors = $errors.ToArray() }
+    return [pscustomobject]@{ Changed = $changed.ToArray(); Removed = $removed.ToArray(); Errors = $errors.ToArray(); FileCount = $list.Count; Truncated = ($list.Count -ge 2000) }
 }
 
 function Get-TrimpleIndexTasks {
@@ -328,9 +406,9 @@ function Get-TrimpleIndexFiles {
 
 function Get-TrimpleLabels {
     param([object[]]$Tasks)
-    $set = @{}
-    foreach ($t in @($Tasks)) { foreach ($l in $t.Labels) { $set[$l] = $true } }
-    return @($set.Keys | Sort-Object)
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($t in @($Tasks)) { if ($null -eq $t) { continue }; foreach ($l in $t.Labels) { [void]$set.Add($l) } }
+    return @($set | Sort-Object)
 }
 
 function Select-TrimpleTasks {
@@ -342,6 +420,7 @@ function Select-TrimpleTasks {
     )
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($t in @($Tasks)) {
+        if ($null -eq $t) { continue }
         if (-not $IncludeDone -and $t.Done) { continue }
         if ($Label -and ($t.Labels -notcontains $Label.ToLowerInvariant())) { continue }
         if ($Search) {
@@ -368,44 +447,55 @@ function Group-TrimpleTasks {
         [object[]]$Tasks,
         [ValidateSet('Priority', 'Label', 'File')][string]$By = 'Priority'
     )
-    $tasks = @($Tasks)
-    $groups = New-Object System.Collections.Generic.List[object]
-    $add = {
-        param($name, $items)
-        $items = @(Sort-TrimpleTasks -Tasks $items)
-        if ($items.Count -gt 0) {
-            $groups.Add([pscustomobject]@{
-                Name = $name
-                Tasks = $items
-                OpenCount = @($items | Where-Object { -not $_.Done }).Count
-            })
+    $clean = New-Object System.Collections.Generic.List[object]
+    foreach ($t in @($Tasks)) { if ($null -ne $t) { $clean.Add($t) } }
+
+    $buckets = @{}
+    $order = New-Object System.Collections.Generic.List[string]
+    $names = @{}
+    $put = {
+        param($key, $name, $task)
+        if (-not $buckets.ContainsKey($key)) {
+            $buckets[$key] = New-Object System.Collections.Generic.List[object]
+            $names[$key] = $name
+            $order.Add($key)
+        }
+        $buckets[$key].Add($task)
+    }
+    foreach ($t in $clean) {
+        switch ($By) {
+            'Priority' { & $put ([string]$t.Priority) '' $t }
+            'File'     { & $put $t.RelPath $t.RelPath $t }
+            'Label'    {
+                if (@($t.Labels).Count -eq 0) { & $put '~none' '(no label)' $t }
+                else { foreach ($l in $t.Labels) { & $put ('#' + $l) ('#' + $l) $t } }
+            }
         }
     }
-    switch ($By) {
-        'Priority' {
-            & $add 'High (!1)'    @($tasks | Where-Object { $_.Priority -eq 1 })
-            & $add 'Medium (!2)'  @($tasks | Where-Object { $_.Priority -eq 2 })
-            & $add 'Low (!3)'     @($tasks | Where-Object { $_.Priority -eq 3 })
-            & $add 'No priority'  @($tasks | Where-Object { $_.Priority -eq 0 })
-        }
-        'Label' {
-            foreach ($l in (Get-TrimpleLabels -Tasks $tasks)) {
-                & $add ('#' + $l) @($tasks | Where-Object { $_.Labels -contains $l })
-            }
-            & $add '(no label)' @($tasks | Where-Object { @($_.Labels).Count -eq 0 })
-        }
-        'File' {
-            foreach ($f in @($tasks | ForEach-Object { $_.RelPath } | Sort-Object -Unique)) {
-                & $add $f @($tasks | Where-Object { $_.RelPath -eq $f })
-            }
-        }
+    $keys = @()
+    if ($By -eq 'Priority') {
+        $fixed = @(@('1', 'High (!1)'), @('2', 'Medium (!2)'), @('3', 'Low (!3)'), @('0', 'No priority'))
+        foreach ($p in $fixed) { if ($buckets.ContainsKey($p[0])) { $names[$p[0]] = $p[1]; $keys += $p[0] } }
+    }
+    elseif ($By -eq 'Label') {
+        $keys = @($order | Where-Object { $_ -ne '~none' } | Sort-Object)
+        if ($buckets.ContainsKey('~none')) { $keys += '~none' }
+    }
+    else { $keys = @($order | Sort-Object) }
+
+    $groups = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $keys) {
+        $items = @(Sort-TrimpleTasks -Tasks $buckets[$k].ToArray())
+        $open = 0
+        foreach ($i in $items) { if (-not $i.Done) { $open++ } }
+        $groups.Add([pscustomobject]@{ Name = $names[$k]; Tasks = $items; OpenCount = $open })
     }
     return $groups.ToArray()
 }
 
 function Get-TrimpleOpenCounts {
     param([object[]]$Tasks)
-    $open = @(@($Tasks) | Where-Object { -not $_.Done })
+    $open = @(@($Tasks) | Where-Object { $null -ne $_ -and -not $_.Done })
     return [pscustomobject]@{
         Total  = $open.Count
         High   = @($open | Where-Object { $_.Priority -eq 1 }).Count
@@ -432,6 +522,46 @@ function Get-TrimpleDefaultSettings {
     }
 }
 
+# Settings come from a file anyone can edit: coerce every value to a safe type and range.
+function Repair-TrimpleSettings {
+    param([Parameter(Mandatory)][hashtable]$Settings)
+    $d = Get-TrimpleDefaultSettings
+    $toInt = {
+        param($v, $min, $max, $fallback)
+        $n = 0
+        if ($null -ne $v -and [int]::TryParse([string]$v, [ref]$n) -and $n -ge $min -and $n -le $max) { return $n }
+        return $fallback
+    }
+    $toBool = {
+        param($v, $fallback)
+        if ($v -is [bool]) { return $v }
+        $b = $false
+        if ($null -ne $v -and [bool]::TryParse([string]$v, [ref]$b)) { return $b }
+        return $fallback
+    }
+    $Settings.FontSize = & $toInt $Settings.FontSize 8 32 $d.FontSize
+    $Settings.PanelWidth = & $toInt $Settings.PanelWidth 150 900 $d.PanelWidth
+    $Settings.WordWrap = & $toBool $Settings.WordWrap $d.WordWrap
+    $Settings.TaskPanelVisible = & $toBool $Settings.TaskPanelVisible $d.TaskPanelVisible
+    $Settings.ShowDone = & $toBool $Settings.ShowDone $d.ShowDone
+    if (@('dark', 'light') -notcontains [string]$Settings.Theme) { $Settings.Theme = $d.Theme }
+    if (@('Priority', 'Label', 'File') -notcontains [string]$Settings.GroupBy) { $Settings.GroupBy = $d.GroupBy }
+    if ($null -eq $Settings.Folder -or $Settings.Folder -isnot [string]) { $Settings.Folder = '' }
+    $files = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @($Settings.OpenFiles)) {
+        if ($f -is [string] -and $f.Length -gt 0 -and -not $f.StartsWith('\\')) { $files.Add($f) }   # no UNC: would trigger network access at startup
+    }
+    $Settings.OpenFiles = $files.ToArray()
+    if ($Settings.Window -isnot [hashtable]) { $Settings.Window = $d.Window }
+    $w = $Settings.Window
+    $w.X = & $toInt $w.X -32000 32000 -1
+    $w.Y = & $toInt $w.Y -32000 32000 -1
+    $w.Width = & $toInt $w.Width 400 10000 $d.Window.Width
+    $w.Height = & $toInt $w.Height 300 10000 $d.Window.Height
+    $w.Maximized = & $toBool $w.Maximized $false
+    return $Settings
+}
+
 function Get-TrimpleSettingsPaths {
     param([string]$AppRoot)
     $paths = @()
@@ -449,13 +579,15 @@ function Import-TrimpleSettings {
             $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8
             $obj = $raw | ConvertFrom-Json
             foreach ($prop in $obj.PSObject.Properties) {
-                if ($prop.Name -eq 'Window' -and $null -ne $prop.Value) {
-                    foreach ($wp in $prop.Value.PSObject.Properties) { $s.Window[$wp.Name] = $wp.Value }
+                if ($prop.Name -eq 'Window') {
+                    if ($prop.Value -is [System.Management.Automation.PSCustomObject]) {
+                        foreach ($wp in $prop.Value.PSObject.Properties) { if ($s.Window.ContainsKey($wp.Name)) { $s.Window[$wp.Name] = $wp.Value } }
+                    }
                 }
                 elseif ($prop.Name -eq 'OpenFiles') { $s.OpenFiles = @($prop.Value) }
                 elseif ($s.ContainsKey($prop.Name)) { $s[$prop.Name] = $prop.Value }
             }
-            return $s
+            return (Repair-TrimpleSettings -Settings $s)
         }
         catch { continue }   # corrupt settings must never stop the app starting
     }
@@ -471,7 +603,9 @@ function Export-TrimpleSettings {
             $dir = Split-Path -Parent $p
             if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
             $enc = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText($p, $json, $enc)
+            $tmp = $p + '.tmp'
+            [System.IO.File]::WriteAllText($tmp, $json, $enc)
+            if (Test-Path -LiteralPath $p) { [System.IO.File]::Replace($tmp, $p, [NullString]::Value) } else { [System.IO.File]::Move($tmp, $p) }
             return $p
         }
         catch { continue }
@@ -485,4 +619,4 @@ Export-ModuleMember -Function `
     ConvertFrom-TrimpleTaskBody, ConvertFrom-TrimpleTaskLine, Get-TrimpleTasksFromText, Set-TrimpleTaskState, `
     Get-TrimpleFileList, Update-TrimpleTaskIndex, Get-TrimpleIndexTasks, Get-TrimpleIndexFiles, `
     Get-TrimpleLabels, Select-TrimpleTasks, Sort-TrimpleTasks, Group-TrimpleTasks, Get-TrimpleOpenCounts, `
-    Get-TrimpleDefaultSettings, Get-TrimpleSettingsPaths, Import-TrimpleSettings, Export-TrimpleSettings
+    Get-TrimpleDefaultSettings, Repair-TrimpleSettings, Get-TrimpleSettingsPaths, Import-TrimpleSettings, Export-TrimpleSettings

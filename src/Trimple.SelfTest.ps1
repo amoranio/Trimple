@@ -23,6 +23,7 @@ function Invoke-TrimpleSelfTest {
         $ui = $script:ui
         & $check ($ui.Form.IsHandleCreated) 'form handle is created'
         & $check ($script:Docs.Count -eq 1) 'starts with one untitled tab'
+        & $check ([string]$script:Settings.Folder -ne $notes) 'a -Folder override is not saved as the default folder'
 
         # --- task panel
         $all = @(Get-TrimpleIndexTasks -Index $script:Index)
@@ -106,6 +107,40 @@ function Invoke-TrimpleSelfTest {
         $hb = [System.IO.File]::ReadAllBytes($homeFile)
         & $check (-not ($hb -contains 13)) 'saving an LF file does not introduce CR'
 
+        # --- saving an untouched tab never rewrites the file
+        $stampBefore = Get-FileStamp -Path $homeFile
+        & $check ((Save-Doc -Doc $d2) -and (Get-FileStamp -Path $homeFile) -eq $stampBefore) 'saving an unmodified tab does not rewrite the file'
+
+        # --- deleted file is noticed, and the notice clears when the file comes back
+        $homeBytes = [System.IO.File]::ReadAllBytes($homeFile)
+        Remove-Item -LiteralPath $homeFile -Force
+        Invoke-Poll
+        & $check ($d2.Conflict -eq 'deleted') 'deleting an open file raises a notice'
+        Start-Sleep -Milliseconds 30
+        [System.IO.File]::WriteAllBytes($homeFile, ($homeBytes + [byte[]](0x23, 0x0A)))
+        Invoke-Poll
+        & $check ($d2.Conflict -eq '') 'the notice clears when the file is restored'
+
+        # --- a file that cannot be re-encoded safely is read-only
+        $badFile = Join-Path $notes 'Bad.txt'
+        $badBytes = [byte[]](0xEF, 0xBB, 0xBF, 0x2D, 0x20, 0x5B, 0x20, 0x5D, 0x20, 0x61, 0xFF, 0x0D, 0x0A)
+        [System.IO.File]::WriteAllBytes($badFile, $badBytes)
+        $d3 = Open-Doc -Path $badFile
+        & $check ($d3.ReadOnly -and $d3.Editor.ReadOnly) 'file with invalid bytes opens read-only'
+        & $check (-not (Save-Doc -Doc $d3) -and -not (Save-Doc -Doc $d3 -SaveAs $true)) 'saving a read-only tab is refused'
+        $badNow = [System.IO.File]::ReadAllBytes($badFile)
+        & $check ($badNow.Length -eq $badBytes.Length -and (@(Compare-Object $badBytes $badNow)).Count -eq 0) 'read-only file is untouched on disk'
+        [void](Close-Doc -Doc $d3)
+        Remove-Item -LiteralPath $badFile -Force
+
+        # --- closing a background tab keeps the current tab
+        Show-Doc -Doc $doc
+        $bg = New-UntitledDoc
+        Show-Doc -Doc $doc
+        [void](Close-Doc -Doc $bg)
+        & $check ($script:ActiveDoc -eq $doc) 'closing a background tab does not switch tabs'
+        Show-Doc -Doc $d2
+
         # --- tab switching, untitled, close
         & $check ($script:Docs.Count -eq 2) 'two tabs open'
         Switch-Doc -Step 1
@@ -123,6 +158,7 @@ function Invoke-TrimpleSelfTest {
         & $check ($null -eq $err) ('theme switching works' + $(if ($err) { ": $err" } else { '' }))
         $ui.Form.PerformLayout()
         $script:LastUiError = $null
+        $ui.ShowDone.Checked = $true       # so completed rows (custom-drawn tick) are painted too
         foreach ($ctl in @($ui.TaskList, $ui.FileList, $ui.Strip)) {
             if ($ctl.Width -lt 10 -or $ctl.Height -lt 10) { $ctl.Size = New-Object System.Drawing.Size(300, 240) }
             $bmp = New-Object System.Drawing.Bitmap($ctl.Width, $ctl.Height)
