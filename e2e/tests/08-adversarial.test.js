@@ -24,7 +24,7 @@ async function openFile(page, name) {
 }
 const dots = (page) => page.locator('#tabs .dot').count();
 
-test('A1. double Ctrl+S does not raise a bogus "changed outside Trimple" prompt', { todo: 'saveDoc has no in-flight guard: the 2nd PUT carries the old expectedHash (web/app.js saveDoc)' }, async () => {
+test('A1. double Ctrl+S does not raise a bogus "changed outside Trimple" prompt', async () => {
   await withApp({}, async (app, page) => {
     let bogus = 0;
     for (let i = 0; i < 8; i++) {
@@ -47,7 +47,7 @@ test('A1. double Ctrl+S does not raise a bogus "changed outside Trimple" prompt'
   });
 });
 
-test('A2. text typed while a save is in flight is not silently marked as saved', { todo: 'saveDoc sets doc.dirty=false / savedText=text after the await even if the textarea changed meanwhile' }, async () => {
+test('A2. text typed while a save is in flight is not silently marked as saved', async () => {
   await withApp({}, async (app, page) => {
     await page.route('**/api/file', async (route) => {
       if (route.request().method() === 'PUT') await new Promise((r) => setTimeout(r, 800));
@@ -169,7 +169,7 @@ test('A7. lots of rapid typing, tab switching and filtering at once stays consis
   });
 });
 
-test('A8. many open tabs: the active tab is scrolled into view in the tab strip', { todo: 'renderTabs never scrolls the active tab into view (web/app.js renderTabs)' }, async () => {
+test('A8. many open tabs: the active tab is scrolled into view in the tab strip', async () => {
   await withApp({ setup: (d) => { for (let i = 0; i < 25; i++) fs.writeFileSync(path.join(d, `Note number ${i} with a fairly long file name.txt`), `- [ ] t${i}\r\n`); } }, async (app, page) => {
     for (let i = 0; i < 25; i++) await page.keyboard.press('Control+o'), await page.keyboard.type(`number ${i} `), await page.keyboard.press('Enter'), await page.locator('.modal-overlay').waitFor({ state: 'detached' });
     assert.equal((await L.tabNames(page)).length, 25);

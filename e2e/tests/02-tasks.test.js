@@ -330,7 +330,7 @@ test('4f. more than 2000 notes shows the truncation banner', async () => {
   });
 });
 
-test('4g. opening a note from the Files list starts at the top (like Notepad), not at the end', { todo: 'makeDoc sets ta.value, which leaves the caret at the END and focus() scrolls there (web/app.js makeDoc/openDoc)' }, async () => {
+test('4g. opening a note from the Files list starts at the top (like Notepad), not at the end', async () => {
   await withApp({ setup: (d) => require('node:fs').writeFileSync(require('node:path').join(d, 'Long.txt'), longNote(400, 0)) }, async (app, page) => {
     await page.click('#filelist button:has-text("Long.txt")');
     await page.waitForSelector('#tabs .tab.active .tname:text("Long.txt")');

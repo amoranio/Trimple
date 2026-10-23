@@ -98,7 +98,7 @@ test('2b. search box and Show completed', async () => {
 });
 
 // UX gap (reported): a user who types the label as shown in the panel ("#dev") gets "No tasks match".
-test('2b-2. searching "#dev" finds tasks labelled #dev', { todo: 'search does not strip a leading # (internal/notes/query.go Select)' }, async () => {
+test('2b-2. searching "#dev" finds tasks labelled #dev', async () => {
   await withApp({}, async (app, page) => {
     await page.fill('#search', '#dev');
     await page.waitForFunction(() => document.querySelectorAll('#tasklist li.task').length === 3, null, { timeout: 3000 });

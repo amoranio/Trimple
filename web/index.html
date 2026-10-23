@@ -7,7 +7,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="loading">
   <div id="app">
     <header id="toolbar" role="toolbar" aria-label="Main">
       <span class="brand">Trimple</span>
@@ -24,7 +24,7 @@
       <button id="btn-theme" title="Switch dark / light (Alt+D)">Theme</button>
     </header>
 
-    <div id="banner" hidden></div>
+    <div id="banner" role="alert" hidden></div>
 
     <div id="main">
       <aside id="side" aria-label="Tasks and files">
@@ -54,10 +54,10 @@
           <div id="folderpath" class="muted" title=""></div>
         </section>
       </aside>
-      <div id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize panel" tabindex="0"></div>
+      <div id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize panel (arrow keys)" aria-valuemin="220" aria-valuemax="900" aria-valuenow="360" tabindex="0"></div>
       <main id="work">
         <div id="tabs" role="tablist" aria-label="Open notes"></div>
-        <div id="notice" hidden>
+        <div id="notice" role="alert" hidden>
           <span id="notice-text"></span>
           <span class="spacer"></span>
           <button id="notice-reload">Reload from disk</button>

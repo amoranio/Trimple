@@ -409,7 +409,7 @@ test('12c. unsaved edits survive closing the window (draft recovery) and reopen 
 // GENUINE BUG: start() awaits refreshState(), but the SSE 'version' event triggers a second refreshState()
 // which makes the first one drop its result (stateSeq check); S.state is still null, so
 // `S.state.files.some(...)` throws, window.__trimpleReady is never set and no tab is restored.
-test('12d. open tabs are restored after a reload (openFiles in settings.json)', { todo: 'startup race: S.state is null when openFiles are restored (web/app.js start/refreshState)' }, async () => {
+test('12d. open tabs are restored after a reload (openFiles in settings.json)', async () => {
   await withApp({}, async (app, page) => {
     await openFile(page, 'Home.txt'); await openFile(page, 'work/Project.txt');
     await L.waitFor(() => app.settings().openFiles.length === 2, { what: 'open files saved' });

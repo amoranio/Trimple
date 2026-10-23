@@ -108,7 +108,16 @@ test('6d. "Reload from disk" discards my edits and shows the outside version', a
     const outside = 'outside version\r\n- [ ] only task\r\n';
     app.write('Work.txt', outside);
     await page.waitForSelector('#notice:not([hidden])', { timeout: 6000 });
+    // discarding unsaved edits asks first; Cancel (Escape) keeps them
     await page.click('#notice-reload');
+    await page.locator('.modal').waitFor();
+    await page.keyboard.press('Escape');
+    await page.locator('.modal-overlay').waitFor({ state: 'detached' });
+    assert.ok((await edValue(page)).includes('DISCARD-ME'), 'cancelling must keep my edits');
+    await page.click('#notice-reload');
+    await page.locator('.modal').waitFor();
+    await page.click('.modal button.primary');
+    await page.locator('.modal-overlay').waitFor({ state: 'detached' });
     await page.waitForFunction(() => [...document.querySelectorAll('textarea.editor')].find((t) => !t.hidden).value === 'outside version\n- [ ] only task\n');
     assert.equal(await noticeVisible(page), false);
     assert.equal(await page.locator('#tabs .dot').count(), 0);

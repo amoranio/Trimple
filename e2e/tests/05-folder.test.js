@@ -119,6 +119,8 @@ test('10c. an unsaved *Untitled* tab survives a folder switch; clean tabs from t
     await page.locator('#tabs .tab', { hasText: 'Untitled' }).filter({ has: page.locator('.dot') }).click();
     await page.keyboard.press('Control+s');
     await L.modal(page).waitFor();
+    // the dialog selects its prefilled name on the next tick; wait for that before typing
+    await page.waitForFunction(() => { const i = document.activeElement; return i && i.tagName === 'INPUT' && i.selectionEnd > i.selectionStart; });
     await page.keyboard.type('scratch');
     await page.keyboard.press('Enter');
     await L.waitFor(() => fs.existsSync(path.join(other, 'scratch.txt')), { what: 'scratch.txt in the new folder' });

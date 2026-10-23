@@ -1,16 +1,16 @@
 :root {
-  --bg: #1e1e1e; --panel: #252526; --input: #2d2d30; --text: #d4d4d4; --muted: #8a8a8a;
-  --border: #3c3c3c; --hover: #37373d; --select: #094771; --accent: #4ea1ff;
-  --p1: #f2645e; --p2: #e5a550; --p3: #5aa9e6; --p0: #9da5b4; --done: #6a6a6a;
-  --warn: #5a4a1e; --tab-idle: #2b2b2b; --danger: #f2645e;
+  --bg: #1e1e1e; --panel: #252526; --input: #2d2d30; --text: #d4d4d4; --muted: #a3a3a3;
+  --border: #5a5a5e; --hover: #37373d; --select: #094771; --accent: #5aa9ff; --accent-bg: #4ea1ff; --on-accent: #0b1320;
+  --p1: #f2645e; --p2: #e5a550; --p3: #5aa9e6; --p0: #9da5b4; --done: #999999;
+  --warn: #5a4a1e; --tab-idle: #2b2b2b; --danger: #ff7b75; --danger-bg: #b3261e; --on-danger: #ffffff;
   --side-w: 360px;
   color-scheme: dark;
 }
 :root[data-theme="light"] {
-  --bg: #ffffff; --panel: #f3f3f3; --input: #ffffff; --text: #1f1f1f; --muted: #6e6e6e;
-  --border: #d0d0d0; --hover: #e4e6f1; --select: #cce4ff; --accent: #0b6bcb;
-  --p1: #d13438; --p2: #c27400; --p3: #0b6bcb; --p0: #6e6e6e; --done: #9a9a9a;
-  --warn: #fff4ce; --tab-idle: #e8e8e8; --danger: #d13438;
+  --bg: #ffffff; --panel: #f3f3f3; --input: #ffffff; --text: #1f1f1f; --muted: #585858;
+  --border: #8c8c8c; --hover: #e4e6f1; --select: #cce4ff; --accent: #0a5fb4; --accent-bg: #0a5fb4; --on-accent: #ffffff;
+  --p1: #d13438; --p2: #a35f00; --p3: #0b6bcb; --p0: #6e6e6e; --done: #666666;
+  --warn: #fff4ce; --tab-idle: #e8e8e8; --danger: #b8262a; --danger-bg: #b8262a; --on-danger: #ffffff;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
@@ -33,22 +33,23 @@ button { cursor: pointer; }
 button:hover:not(:disabled) { background: var(--hover); }
 button:disabled { opacity: .45; cursor: default; }
 button[aria-pressed="true"] { border-color: var(--accent); }
-button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.primary { background: var(--accent-bg); color: var(--on-accent); border-color: var(--accent-bg); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 #toolbar {
-  display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px;
   background: var(--panel); border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 600; margin-right: 8px; letter-spacing: .02em; }
 
 #banner {
-  padding: 6px 12px; background: var(--danger); color: #fff; font-weight: 600;
+  padding: 6px 12px; background: var(--danger-bg); color: var(--on-danger); font-weight: 600;
 }
+body.loading #app { visibility: hidden; }
 
 #main { flex: 1; display: flex; min-height: 0; }
 #side {
-  width: var(--side-w); min-width: 220px; display: flex; flex-direction: column;
+  width: var(--side-w); min-width: 220px; max-width: calc(100vw - 260px); display: flex; flex-direction: column;
   background: var(--panel); min-height: 0;
 }
 #splitter { width: 4px; cursor: col-resize; background: var(--border); flex: none; }
@@ -56,7 +57,8 @@ button.primary { background: var(--accent); color: #fff; border-color: var(--acc
 body.panel-hidden #side, body.panel-hidden #splitter { display: none; }
 
 #tasks { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 8px 0 0; }
-#files { flex: none; height: 30%; min-height: 110px; display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 6px; }
+#tasks { min-height: 180px; }
+#files { flex: none; height: 30%; min-height: 96px; display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 6px; }
 .side-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 12px; }
 h2 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 #counts, #filecount { font-size: 12px; }
@@ -105,12 +107,12 @@ ul { list-style: none; margin: 0; padding: 0; }
 #work { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 #tabs { display: flex; align-items: stretch; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; min-height: 34px; }
 .tab {
-  display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; max-width: 220px; min-width: 90px;
-  background: var(--tab-idle); border: 0; border-right: 1px solid var(--border); border-top: 2px solid transparent;
-  border-radius: 0; color: var(--muted); cursor: pointer; flex: none;
+  display: flex; align-items: center; gap: 6px; padding: 0 6px 0 4px; max-width: 220px; min-width: 90px;
+  background: var(--tab-idle); border-right: 1px solid var(--border); border-top: 2px solid transparent;
+  color: var(--muted); flex: none;
 }
 .tab.active { background: var(--bg); color: var(--text); border-top-color: var(--accent); }
-.tab .tname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .tname { flex: 1; min-width: 0; text-align: left; background: none; border: 0; color: inherit; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab .tclose { width: 18px; height: 18px; padding: 0; line-height: 16px; border: 0; background: none; border-radius: 3px; color: inherit; flex: none; }
 .tab .tclose:hover { background: var(--hover); }
 .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text); flex: none; }
@@ -130,6 +132,7 @@ textarea.editor[readonly] { opacity: .85; }
 
 #status { display: flex; gap: 18px; padding: 2px 12px; font-size: 12px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--border); min-height: 24px; align-items: center; }
 #status .err { color: var(--danger); }
+#msg { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; min-width: 360px; max-width: min(640px, 92vw); max-height: 86vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.45); }

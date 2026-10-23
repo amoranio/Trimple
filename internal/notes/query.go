@@ -89,7 +89,7 @@ func Select(tasks []Task, q Query) []Task {
 			}
 		}
 		if search != "" {
-			hay := strings.ToLower(t.Text + " " + strings.Join(t.Labels, " ") + " " + t.Path)
+			hay := strings.ToLower(t.Text + " #" + strings.Join(t.Labels, " #") + " " + t.Path) // labels as shown: "#dev"
 			if !strings.Contains(hay, search) {
 				continue
 			}

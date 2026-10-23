@@ -24,7 +24,7 @@
     token: '', os: '', canNotepad: false,
     settings: null, state: null, folder: '',
     docs: [], active: null, nextId: 1, untitled: 0,
-    modal: false, stateSeq: 0, connected: false,
+    modal: false, stateSeq: 0, connected: false, refreshing: null, lastOwnWrite: 0, busyTask: false,
   };
 
   const params = new URLSearchParams(location.search);
@@ -67,14 +67,17 @@
     return new Promise((resolve) => {
       S.modal = true;
       const prevFocus = document.activeElement;
+      $('#app').inert = true; // nothing behind the dialog can be reached or typed into
       const close = (id) => {
         document.removeEventListener('keydown', keyHandler, true);
         overlay.remove();
         S.modal = false;
+        $('#app').inert = false;
         if (prevFocus && prevFocus.focus) prevFocus.focus();
         resolve(id);
       };
       const keyHandler = (e) => {
+        if (e.isComposing) return;
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(cancelId); }
         else if (onKey) onKey(e, close);
       };
@@ -95,7 +98,8 @@
 
   // ------------------------------------------------------------------ settings and appearance
   const saveSettingsSoon = debounce(async () => {
-    try { S.settings = Object.assign(S.settings, await api('PUT', '/api/settings', settingsPayload())); }
+    if (!S.settings) return;
+    try { await api('PUT', '/api/settings', settingsPayload()); }
     catch (e) { say('Could not save settings: ' + e.message, true); }
   }, 400);
 
@@ -118,6 +122,7 @@
     $('#group').value = s.groupBy;
     $('#showdone').checked = s.showDone;
     for (const d of S.docs) styleEditor(d.ta);
+    $('#splitter').setAttribute('aria-valuenow', String(s.panelWidth));
   }
 
   function styleEditor(ta) {
@@ -131,16 +136,42 @@
   }
 
   // ------------------------------------------------------------------ task panel
-  async function refreshState() {
+  function refreshState() {
     const seq = ++S.stateSeq;
-    const q = new URLSearchParams({ group: $('#group').value, label: $('#label').value, q: $('#search').value, done: $('#showdone').checked ? '1' : '0' });
-    let st;
-    try { st = await api('GET', '/api/state?' + q); }
-    catch (e) { if (seq === S.stateSeq) say(e.message, true); return; }
-    if (seq !== S.stateSeq) return; // a newer request is on its way
-    S.state = st;
-    S.folder = st.folder;
-    renderLabels(); renderTasks(); renderFiles(); renderCounts();
+    const wanted = $('#label').value;
+    const q = new URLSearchParams({ group: $('#group').value, label: wanted, q: $('#search').value, done: $('#showdone').checked ? '1' : '0' });
+    const p = (async () => {
+      let st;
+      try { st = await api('GET', '/api/state?' + q); }
+      catch (e) { if (seq === S.stateSeq) say(e.message, true); return S.refreshing; }
+      if (seq !== S.stateSeq) return S.refreshing; // a newer request is on its way: wait for it
+      S.state = st;
+      S.folder = st.folder;
+      const focusKey = focusedTaskKey();
+      renderLabels(); renderTasks(); renderFiles(); renderCounts();
+      restoreFocus(focusKey);
+      if (wanted && $('#label').value !== wanted) refreshStateSoon(); // that label no longer exists
+      return undefined;
+    })();
+    S.refreshing = p;
+    return p;
+  }
+
+  function focusedTaskKey() {
+    const a = document.activeElement;
+    const row = a && a.closest && a.closest('li.task');
+    if (!row) return null;
+    return { path: row.dataset.path, line: row.dataset.line, kind: a.classList.contains('tick') ? 'tick' : 'text' };
+  }
+  function restoreFocus(key) {
+    if (!key || S.modal) return;
+    for (const row of $('#tasklist').querySelectorAll('li.task')) {
+      if (row.dataset.path === key.path && row.dataset.line === key.line) {
+        const el = row.querySelector(key.kind === 'tick' ? 'input.tick' : 'button.ttext');
+        if (el) el.focus();
+        return;
+      }
+    }
   }
   const refreshStateSoon = debounce(refreshState, 120);
 
@@ -167,7 +198,7 @@
     const ul = $('#tasklist');
     ul.replaceChildren();
     for (const g of S.state.groups) {
-      ul.append(h('li', { class: 'group', role: 'presentation' }, h('span', { text: g.name }), h('span', { text: String(g.open) })));
+      ul.append(h('li', { class: 'group' }, h('span', { text: g.name }), h('span', { text: String(g.open) })));
       for (const t of g.tasks) ul.append(taskRow(t));
     }
     if (!S.state.groups.length) {
@@ -198,12 +229,21 @@
   }
 
   async function toggleTask(t) {
+    if (S.busyTask) return; // ignore double-clicks while the first one is being applied
     const doc = findDoc(t.path);
     if (doc && doc.dirty) { say(`Save "${doc.name}" first - it has unsaved changes.`, true); return; }
-    try { await api('POST', '/api/task', { path: t.path, line: t.line, done: !t.done, raw: t.raw }); }
-    catch (e) { say('Could not update the task: ' + e.message, true); await refreshState(); return; }
-    await refreshState();
-    if (doc) await reloadDoc(doc);
+    S.busyTask = true;
+    try {
+      S.lastOwnWrite = Date.now();
+      try { await api('POST', '/api/task', { path: t.path, line: t.line, done: !t.done, raw: t.raw }); }
+      catch (e) {
+        say(e.code === 'stale' ? 'That task changed on disk, so the list was refreshed. Try again.' : 'Could not update the task: ' + e.message, true);
+        await refreshState();
+        return;
+      }
+      await refreshState();
+      if (doc && !doc.dirty) await reloadDoc(doc);
+    } finally { S.busyTask = false; }
   }
 
   // ------------------------------------------------------------------ documents
@@ -213,9 +253,10 @@
     const ta = h('textarea', { class: 'editor', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', 'aria-label': 'Note text', hidden: true });
     const doc = Object.assign({
       id: S.nextId++, path: '', name: 'Untitled', kind: 'utf8', eol: 'crlf', hash: '', stamp: '', seenStamp: '',
-      readOnly: false, problem: '', dirty: false, conflict: '', savedText: '', ta,
+      readOnly: false, problem: '', dirty: false, conflict: '', savedText: '', ta, scroll: 0, saving: false,
     }, o);
     ta.value = doc.savedText;
+    ta.setSelectionRange(0, 0); // a note opens at its top, like Notepad (setting value leaves the caret at the end)
     ta.readOnly = doc.readOnly;
     styleEditor(ta);
     ta.addEventListener('input', () => onEdit(doc));
@@ -227,23 +268,37 @@
   }
 
   function onEdit(doc) {
+    const was = doc.dirty;
     doc.dirty = doc.ta.value !== doc.savedText;
     saveDraftSoon(doc);
-    renderTabs(); updateStatus();
+    if (doc.dirty !== was) renderTabs();
+    updateStatus();
+  }
+
+  // Replace [start,end) with text in a way the browser can undo (Ctrl+Z); fall back to setRangeText.
+  function editText(ta, start, end, text, selectAfter) {
+    ta.focus();
+    ta.setSelectionRange(start, end);
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, text); } catch (_) { ok = false; }
+    if (!ok) { ta.setRangeText(text, start, end, 'end'); ta.dispatchEvent(new Event('input')); }
+    if (selectAfter != null) ta.setSelectionRange(selectAfter, selectAfter);
   }
 
   function editorKey(e, doc) {
-    if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey && !doc.readOnly) {
+    if (e.isComposing) return;
+    // Tab types a tab; Shift+Tab (and Esc then Tab) still move focus so keyboard users are never trapped.
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !doc.readOnly) {
       e.preventDefault();
-      const ta = doc.ta;
-      ta.setRangeText('\t', ta.selectionStart, ta.selectionEnd, 'end');
-      ta.dispatchEvent(new Event('input'));
+      editText(doc.ta, doc.ta.selectionStart, doc.ta.selectionEnd, '\t');
     }
   }
 
   function showDoc(doc) {
+    if (S.active && S.active !== doc && S.docs.includes(S.active)) S.active.scroll = S.active.ta.scrollTop;
     S.active = doc;
     for (const d of S.docs) d.ta.hidden = d !== doc;
+    doc.ta.scrollTop = doc.scroll || 0;
     renderTabs(); renderNotice(); updateStatus(); if (S.state) renderFiles();
     document.title = (doc.dirty ? '* ' : '') + doc.name + ' - Trimple';
     if (!S.modal) doc.ta.focus();
@@ -275,7 +330,8 @@
       let f;
       try { f = await api('GET', '/api/file?path=' + encodeURIComponent(path)); }
       catch (e) { say(`Could not open ${path}: ${e.message}`, true); return null; }
-      doc = makeDoc({
+      doc = findDoc(path); // another open of the same note may have finished while we were waiting
+      if (!doc) doc = makeDoc({
         path: f.path, name: baseName(f.path), kind: f.kind, eol: f.eol, hash: f.hash, stamp: f.stamp,
         readOnly: !f.lossless, problem: f.problem, savedText: f.text,
       });
@@ -322,10 +378,11 @@
     updateStatus();
   }
 
-  async function reloadDoc(doc) {
+  async function reloadDoc(doc, force = false) {
     let f;
     try { f = await api('GET', '/api/file?path=' + encodeURIComponent(doc.path)); }
     catch (e) { if (e.code === 'missing') { doc.conflict = 'deleted'; renderTabs(); renderNotice(); } return; }
+    if (doc.dirty && !force) return; // the user typed while we were fetching: keep their text
     applyFile(doc, f);
   }
 
@@ -348,6 +405,7 @@
     if (!/\.txt$/i.test(n)) n += '.txt';
     return n;
   }
+  const hiddenName = (n) => n.split('/').some((part) => part.startsWith('.'));
 
   async function promptName(initial) {
     const input = h('input', { type: 'text', value: initial, 'aria-label': 'File name', spellcheck: 'false' });
@@ -367,18 +425,23 @@
       await ask('Read-only file', `"${doc.name}" ${doc.problem}, so Trimple opened it read-only and will not write it.\n\nUse Notepad to edit this file.`, [{ id: 'ok', label: 'OK', primary: true }]);
       return false;
     }
-    if (!saveAs && doc.path && !doc.dirty) { say('No changes to save.'); return true; }
+    if (doc.saving) return false; // a save is already in flight (key repeat, double click)
+    if (!saveAs && doc.path && !doc.dirty && doc.conflict !== 'deleted') { say('No changes to save.'); return true; }
     let path = doc.path, create = false;
     if (!path || saveAs) {
       const name = await promptName(doc.path || 'Notes.txt');
       if (!name) return false;
+      if (hiddenName(name)) { say('Could not save: note names cannot start with a dot.', true); return false; }
       const other = findDoc(name);
       if (other && other !== doc) { say(`"${name}" is already open in another tab.`, true); return false; }
       path = name; create = true;
     }
     const text = doc.ta.value;
     const body = { path, text, kind: doc.kind, eol: doc.eol, expectedHash: create ? '' : doc.hash, create, overwrite: false, allowUpgrade: false };
+    if (!create && !body.expectedHash) body.overwrite = true; // recreating a note that was deleted underneath us
     let res;
+    doc.saving = true;
+    try {
     for (;;) {
       try { res = await api('PUT', '/api/file', body); break; }
       catch (e) {
@@ -394,9 +457,13 @@
         } else { say('Could not save: ' + e.message, true); return false; }
       }
     }
+    } finally { doc.saving = false; }
+    S.lastOwnWrite = Date.now();
+    if (doc.path && doc.path !== path) forgetDraft(doc); // Save As: the old name's draft is stale
     doc.path = path; doc.name = baseName(path); doc.kind = res.kind; doc.hash = res.hash; doc.stamp = res.stamp; doc.seenStamp = '';
-    doc.savedText = text; doc.dirty = false; doc.conflict = '';
-    forgetDraft(doc);
+    doc.savedText = text; doc.conflict = '';
+    doc.dirty = doc.ta.value !== text; // keys typed while the save was in flight stay unsaved
+    if (!doc.dirty) forgetDraft(doc); else saveDraftSoon(doc);
     renderTabs(); renderNotice(); updateStatus();
     say('Saved ' + doc.name);
     saveSettingsSoon(); refreshState();
@@ -430,23 +497,32 @@
   // ---- unsaved-draft recovery (survives a crashed window)
   function readDrafts() { try { return JSON.parse(localStorage.getItem('trimple.drafts') || '{}'); } catch (_) { return {}; } }
   function writeDrafts(d) { try { localStorage.setItem('trimple.drafts', JSON.stringify(d)); } catch (_) { /* storage unavailable */ } }
-  const saveDraftSoon = debounce((doc) => {
-    if (!doc.path || doc.readOnly || !S.docs.includes(doc)) return;
+  const draftKey = (doc) => S.folder + '|' + doc.path;
+  function saveDraftSoon(doc) {
+    clearTimeout(doc.draftTimer); // one timer per tab, so editing tab B never cancels tab A's draft
+    doc.draftTimer = setTimeout(() => {
+      if (!doc.path || doc.readOnly || !S.docs.includes(doc)) return;
+      const d = readDrafts();
+      if (doc.dirty) d[draftKey(doc)] = { text: doc.ta.value, hash: doc.hash }; else delete d[draftKey(doc)];
+      writeDrafts(d);
+    }, 800);
+  }
+  function forgetDraft(doc) {
+    if (!doc.path) return;
+    clearTimeout(doc.draftTimer);
     const d = readDrafts();
-    if (doc.dirty) d[doc.path] = { text: doc.ta.value, hash: doc.hash }; else delete d[doc.path];
-    writeDrafts(d);
-  }, 800);
-  function forgetDraft(doc) { if (!doc.path) return; const d = readDrafts(); if (d[doc.path]) { delete d[doc.path]; writeDrafts(d); } }
+    if (d[draftKey(doc)]) { delete d[draftKey(doc)]; writeDrafts(d); }
+  }
   function restoreDrafts() {
     const d = readDrafts();
     for (const doc of S.docs) {
-      const r = doc.path && d[doc.path];
-      if (r && r.hash === doc.hash && r.text !== doc.savedText && !doc.readOnly) {
-        doc.ta.value = r.text; doc.dirty = true;
-        say(`Restored unsaved changes in "${doc.name}".`);
-      }
+      const r = doc.path && d[draftKey(doc)];
+      if (!r || doc.readOnly || r.text === doc.savedText) continue;
+      doc.ta.value = r.text; doc.dirty = true;
+      if (r.hash === doc.hash) say(`Restored unsaved changes in "${doc.name}".`);
+      else { doc.conflict = 'changed'; say(`"${doc.name}" changed on disk after your unsaved edits; both are kept.`, true); }
     }
-    renderTabs();
+    renderTabs(); renderNotice();
   }
 
   // ---- outside changes and conflicts
@@ -461,15 +537,18 @@
       const st = stats[doc.path];
       if (!st) continue;
       if (!st.exists) {
-        if (doc.conflict !== 'deleted') { doc.conflict = 'deleted'; changed = true; }
+        if (doc.conflict !== 'deleted' && doc.hash !== '') { doc.conflict = 'deleted'; changed = true; }
         continue;
       }
       if (doc.conflict === 'deleted') { doc.conflict = ''; changed = true; }
-      if (st.stamp === doc.stamp || st.stamp === doc.seenStamp) continue;
+      if (st.stamp === doc.stamp || (doc.dirty && st.stamp === doc.seenStamp)) continue;
       let f;
       try { f = await api('GET', '/api/file?path=' + encodeURIComponent(doc.path)); } catch (_) { continue; }
       if (f.hash === doc.hash) { doc.stamp = f.stamp; continue; } // touched, not changed
-      if (!doc.dirty) { applyFile(doc, f); say(`Reloaded "${doc.name}" (changed outside Trimple).`); }
+      if (!doc.dirty) {
+        applyFile(doc, f);
+        if (Date.now() - S.lastOwnWrite > 4000) say(`Reloaded "${doc.name}" (changed outside Trimple).`);
+      }
       else { doc.conflict = 'changed'; doc.seenStamp = st.stamp; changed = true; }
     }
     if (changed) { renderTabs(); renderNotice(); }
@@ -490,20 +569,20 @@
   function renderTabs() {
     const tabs = $('#tabs');
     const frag = [];
-    S.docs.forEach((d, i) => {
+    S.docs.forEach((d) => {
       frag.push(h('div', {
         class: 'tab' + (d === S.active ? ' active' : '') + (d.conflict ? ' conflict' : '') + (d.readOnly ? ' readonly' : ''),
-        role: 'tab', 'aria-selected': String(d === S.active), tabindex: '0', title: d.path || d.name, dataset: { id: String(d.id) },
-        onclick: (e) => { if (!e.target.closest('.tclose')) showDoc(d); },
+        role: 'presentation', title: d.path || d.name, dataset: { id: String(d.id) },
         onauxclick: (e) => { if (e.button === 1) { e.preventDefault(); closeDoc(d); } },
-        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showDoc(d); } },
       },
-        h('span', { class: 'tname', text: d.name }),
-        d.dirty ? h('span', { class: 'dot', title: 'Unsaved changes', 'aria-label': 'unsaved' }) : null,
-        h('button', { class: 'tclose', 'aria-label': 'Close ' + d.name, title: 'Close (Alt+W)', onclick: (e) => { e.stopPropagation(); closeDoc(d); } }, '×')));
+        h('button', { class: 'tname', role: 'tab', 'aria-selected': String(d === S.active), onclick: () => showDoc(d) }, d.name),
+        d.dirty ? h('span', { class: 'dot', role: 'img', title: 'Unsaved changes', 'aria-label': 'unsaved changes' }) : null,
+        h('button', { class: 'tclose', 'aria-label': 'Close ' + d.name, title: 'Close (Alt+W)', onclick: (e) => { e.stopPropagation(); closeDoc(d); } }, '\u00d7')));
     });
     frag.push(h('button', { class: 'newtab', title: 'New note (Alt+N)', 'aria-label': 'New note', onclick: () => newDoc() }, '+'));
     tabs.replaceChildren(...frag);
+    const active = tabs.querySelector('.tab.active');
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     if (S.active) document.title = (S.active.dirty ? '* ' : '') + S.active.name + ' - Trimple';
   }
 
@@ -511,11 +590,14 @@
     const doc = S.active;
     if (!doc) return;
     const ta = doc.ta;
-    const pos = ta.selectionStart;
-    const before = ta.value.slice(0, pos);
-    const line = before.split('\n').length;
-    const col = pos - (before.lastIndexOf('\n') + 1) + 1;
-    $('#pos').textContent = `Ln ${line}, Col ${col}`;
+    const pos = ta.selectionStart, v = ta.value;
+    let line = 1, lastBreak = -1, i = 0;
+    while (i < pos) {
+      const nl = v.indexOf('\n', i);
+      if (nl < 0 || nl >= pos) break;
+      line++; lastBreak = nl; i = nl + 1;
+    }
+    $('#pos').textContent = `Ln ${line}, Col ${pos - lastBreak}`;
     $('#enc').textContent = { utf8: 'UTF-8', utf8bom: 'UTF-8 BOM', utf16le: 'UTF-16 LE', utf16be: 'UTF-16 BE', ansi: 'ANSI' }[doc.kind] || doc.kind;
     $('#eol').textContent = doc.eol.toUpperCase();
   }
@@ -523,7 +605,7 @@
   // ------------------------------------------------------------------ editor commands
   function currentLineBounds(ta) {
     const v = ta.value, pos = ta.selectionStart;
-    const start = v.lastIndexOf('\n', pos - 1) + 1;
+    const start = pos ? v.lastIndexOf('\n', pos - 1) + 1 : 0;
     let end = v.indexOf('\n', pos);
     if (end < 0) end = v.length;
     return [start, end];
@@ -538,9 +620,7 @@
     if (!m) { say('No task on this line.'); return; }
     const caret = ta.selectionStart;
     const at = start + m[1].length;
-    ta.setRangeText(m[2] === ' ' ? 'x' : ' ', at, at + 1, 'preserve');
-    ta.setSelectionRange(caret, caret);
-    ta.dispatchEvent(new Event('input'));
+    editText(ta, at, at + 1, m[2] === ' ' ? 'x' : ' ', caret);
   }
 
   function insertTask() {
@@ -548,9 +628,7 @@
     if (!doc || doc.readOnly) return;
     const ta = doc.ta;
     const [start] = currentLineBounds(ta);
-    ta.setRangeText('- [ ] ', start, start, 'end');
-    ta.focus();
-    ta.dispatchEvent(new Event('input'));
+    editText(ta, start, start, '- [ ] ');
   }
 
   async function openInNotepad() {
@@ -685,11 +763,17 @@
     $('#label').onchange = refreshState;
     $('#search').oninput = refreshStateSoon;
     $('#showdone').onchange = () => { S.settings.showDone = $('#showdone').checked; saveSettingsSoon(); refreshState(); };
-    $('#notice-reload').onclick = () => { if (S.active) reloadDoc(S.active); };
+    $('#notice-reload').onclick = async () => {
+      const doc = S.active;
+      if (!doc) return;
+      if (doc.dirty && await ask('Discard your edits?', `Reloading "${doc.name}" from disk throws away the unsaved changes in this tab.`, [
+        { id: 'no', label: 'Cancel' }, { id: 'yes', label: 'Reload from disk', primary: true }]) !== 'yes') return;
+      await reloadDoc(doc, true);
+    };
     $('#notice-keep').onclick = async () => {
       const doc = S.active;
       if (!doc) return;
-      if (doc.conflict === 'deleted') { doc.hash = ''; doc.stamp = ''; doc.conflict = ''; }
+      if (doc.conflict === 'deleted') { doc.hash = ''; doc.stamp = ''; doc.conflict = ''; doc.dirty = true; } // Save recreates it
       else {
         try { const f = await api('GET', '/api/file?path=' + encodeURIComponent(doc.path)); doc.hash = f.hash; doc.stamp = f.stamp; doc.seenStamp = ''; doc.conflict = ''; }
         catch (e) { say(e.message, true); return; }
@@ -712,6 +796,7 @@
     });
 
     window.addEventListener('keydown', onKey);
+    for (const ev of ['dragover', 'drop']) window.addEventListener(ev, (e) => e.preventDefault()); // a dropped file must not navigate away
     window.addEventListener('focus', () => { if (S.state) checkDocs(); });
     window.addEventListener('beforeunload', (e) => { if (S.docs.some((d) => d.dirty)) { e.preventDefault(); e.returnValue = ''; } });
   }
@@ -720,9 +805,18 @@
   function toggleTheme() { S.settings.theme = S.settings.theme === 'dark' ? 'light' : 'dark'; applyAppearance(); saveSettingsSoon(); }
 
   function onKey(e) {
-    if (S.modal) return;
+    if (e.isComposing) return;
     const ctrl = e.ctrlKey || e.metaKey;
-    const k = e.key.toLowerCase();
+    const k = (e.key || '').toLowerCase();
+    // keep the browser's own Save Page / Open File / reload from firing behind a dialog
+    if (S.modal) {
+      if ((ctrl && !e.altKey && (k === 's' || k === 'o' || k === 'b')) || e.key === 'F5') e.preventDefault();
+      return;
+    }
+    if (e.repeat && (ctrl || e.altKey)) { // holding a shortcut must not repeat it (save twice, close every tab ...)
+      if (/^(s|o|b|n|w|t|p|d|enter)$/.test(k)) e.preventDefault();
+      return;
+    }
     if (ctrl && !e.altKey && k === 's') { e.preventDefault(); saveDoc(S.active, e.shiftKey); }
     else if (ctrl && !e.altKey && !e.shiftKey && k === 'o') { e.preventDefault(); quickOpen(); }
     else if (ctrl && !e.altKey && !e.shiftKey && k === 'b') { e.preventDefault(); togglePanel(); }
@@ -737,7 +831,7 @@
     else if (e.altKey && !ctrl && !e.shiftKey && k === 't') { e.preventDefault(); insertTask(); }
     else if (e.altKey && !ctrl && !e.shiftKey && k === 'p') { e.preventDefault(); openInNotepad(); }
     else if (e.altKey && !ctrl && !e.shiftKey && k === 'd') { e.preventDefault(); toggleTheme(); }
-    else if (e.altKey && !ctrl && /^[1-9]$/.test(e.key)) { const d = S.docs[Number(e.key) - 1]; if (d) { e.preventDefault(); showDoc(d); } }
+    else if (e.altKey && !ctrl && /^Digit[1-9]$/.test(e.code || '')) { const d = S.docs[Number(e.code.slice(5)) - 1]; if (d) { e.preventDefault(); showDoc(d); } }
     else if (e.key === 'F5') { e.preventDefault(); refreshState(); checkDocs(); }
   }
 
@@ -747,6 +841,7 @@
     let boot;
     try { boot = await api('GET', '/api/bootstrap'); }
     catch (e) {
+      document.body.classList.remove('loading');
       const bar = $('#banner'); bar.hidden = false;
       bar.textContent = e.status === 401 ? 'This window is not connected to Trimple. Start Trimple again.' : e.message;
       return;
@@ -754,10 +849,10 @@
     S.os = boot.os; S.canNotepad = boot.notepad; S.settings = boot.settings; S.folder = boot.folder;
     if (!S.canNotepad) $('#btn-notepad').hidden = true;
     applyAppearance();
+    document.body.classList.remove('loading');
     $('#folderpath').textContent = boot.folder;
     newDoc();
     S.connected = true;
-    connectEvents();
     if (!boot.folder) { if (!(await changeFolder(true))) say('Choose a notes folder to see your tasks.', true); }
     await refreshState();
 
@@ -774,6 +869,7 @@
       } catch (e) { say(e.message, true); }
     }
     if (S.docs.length) showDoc(S.docs[S.docs.length - 1]);
+    connectEvents(); // only now, so a live update can never race the startup sequence above
     window.__trimpleReady = true;
   }
 
