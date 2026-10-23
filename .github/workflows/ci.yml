@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          ./tests/Run-Tests.ps1
+      - name: Adversarial tests (Windows PowerShell 5.1, no timing limits)
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          ./tests/Adversarial.Tests.ps1 -SkipPerf
+      - name: Core + adversarial tests (PowerShell 7)
+        shell: pwsh
+        run: |
+          ./tests/Run-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/Adversarial.Tests.ps1
+      - name: UI self-test (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          ./Trimple.ps1 -SelfTest
+      - name: UI self-test (PowerShell 7, informational)
+        # Trimple.bat launches Windows PowerShell 5.1, which is the supported UI runtime and is gated above.
+        continue-on-error: true
+        shell: pwsh
+        run: ./Trimple.ps1 -SelfTest
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core + adversarial tests (PowerShell 7 on Linux)
+        shell: pwsh
+        run: |
+          ./tests/Run-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/Adversarial.Tests.ps1
