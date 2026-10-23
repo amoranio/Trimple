@@ -130,6 +130,11 @@ test('15. a long mixed session raises no console errors, page exceptions or nati
     const page = await L.openPage(browser, app);
     // lots of ordinary use
     await page.click('#tasklist .ttext >> nth=0');
+    // the note opens asynchronously: wait for it (and its focus) before typing, as a person would
+    await page.waitForFunction(() => {
+      const a = document.activeElement;
+      return a && a.classList.contains('editor') && !a.hidden && a.value.length > 0;
+    });
     await page.keyboard.type(' typed');
     await page.keyboard.press('Control+s');
     await L.sleep(300);
