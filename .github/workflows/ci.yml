@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          ./tests/Run-Tests.ps1
+      - name: Core tests (PowerShell 7)
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1
+      - name: UI self-test (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          ./Trimple.ps1 -SelfTest
+      - name: UI self-test (PowerShell 7)
+        shell: pwsh
+        run: ./Trimple.ps1 -SelfTest
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core tests (PowerShell 7 on Linux)
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1

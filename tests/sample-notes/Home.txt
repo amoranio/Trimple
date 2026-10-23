@@ -1,0 +1,5 @@
+Shopping and home
+
+- [ ] Renew parking pass !2 #home
+- [ ] Buy printer ink #home #admin
+* [x] Call plumber !1 #home

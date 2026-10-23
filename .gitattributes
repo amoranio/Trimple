@@ -1,0 +1,6 @@
+* text=auto
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+# Sample notes are test fixtures with deliberate line endings: never normalise them.
+tests/sample-notes/** -text
