@@ -9,17 +9,20 @@ permissions:
 
 jobs:
   go:
-    name: go test (${{ matrix.os }})
+    name: go test (${{ matrix.os }}, Go ${{ matrix.go }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - { os: ubuntu-latest, go: '1.22' }   # the minimum declared in go.mod
+          - { os: ubuntu-latest, go: stable }
+          - { os: windows-latest, go: stable }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: ${{ matrix.go }}
           cache: false
       - name: gofmt
         if: runner.os == 'Linux'
@@ -48,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=ci-${{ github.sha }}" -o dist/Trimple.exe ./cmd/trimple
+          go build -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=ci-${{ github.sha }}" -o dist/Trimple.exe ./cmd/trimple
           Get-Item dist/Trimple.exe | Select-Object Name, Length
       - name: Smoke test the real exe
         shell: pwsh

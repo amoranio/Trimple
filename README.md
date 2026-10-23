@@ -10,7 +10,7 @@ Download `Trimple.exe` from the latest [release](../../releases) (or from the **
 
 * Windows may show *"Windows protected your PC"* the first time because the file is not code-signed. Click **More info → Run anyway**.
 * On first run pick the folder that holds your notes, or let Trimple create `Documents\Trimple Notes` with a short `Welcome.txt`.
-* Closing the window quits Trimple (after a few seconds). Double-clicking it again while it is running just opens another window on the same instance.
+* Closing the window quits Trimple after about a minute (so a quick reopen reuses it). Double-clicking `Trimple.exe` while it is running just opens another window on the same instance. Wait for it to quit before replacing the file with a newer version.
 
 ## Writing tasks
 
@@ -73,8 +73,9 @@ The app is a local web server, so it is locked down: it listens on `127.0.0.1` o
 ## Settings, logs and files Trimple creates
 
 * `%AppData%\Trimple\settings.json`: your preferences and open tabs.
-* `%AppData%\Trimple\trimple.log` and `instance.json` (port/token of the running copy, deleted on exit).
-* `*.trimple-tmp` appears next to a note for a moment while it is being saved.
+* `%LocalAppData%\Trimple\trimple.log` (errors and crashes) and `instance.json` (port and secret token of the running copy, removed on exit).
+* A hidden `.trimple-*.tmp` file appears next to a note for a moment while it is being saved.
+* Unsaved-text drafts live in the browser profile's local storage for the app window.
 
 Flags (run `Trimple.exe -h` from a terminal): `-folder`, `-config`, `-port`, `-no-browser`, `-keep-alive`, `-version`. Extra arguments are notes to open, so `Trimple.exe todo.txt` works from a shortcut or "Open with".
 
@@ -87,7 +88,7 @@ go test -race ./...                                        # core + server tests
 cd e2e && npm ci && npm test                               # drives the real UI in a real browser
 ```
 
-CI runs all of this on Windows and Linux for every push, builds `Trimple.exe`, smoke-tests the built exe on a real Windows runner, and drives the UI with Edge on Windows.
+CI runs all of this on Windows and Linux for every push (Go 1.22 and current), builds `Trimple.exe`, smoke-tests the built exe on a real Windows runner (including a file locked like an editor locks it, and the Notepad hand-off), and drives the UI with Microsoft Edge on Windows and Chrome on Linux.
 
 ## Layout
 
@@ -105,7 +106,11 @@ legacy-powershell/  the first version (PowerShell + WinForms), kept as a fallbac
 ## Known limits
 
 * Windows 10/11 is the target. Open in Notepad is Windows-only; the rest runs anywhere Go does.
-* `.txt` only; hidden and symlinked/junction folders and files over 5 MB are skipped; at most 2000 notes are scanned (pick a smaller folder if you hit it).
+* `.txt` only; hidden/system folders, symlinked or junction folders, hidden (dot-prefixed) notes and files over 5 MB are skipped; at most 2000 notes are scanned (pick a smaller folder if you hit it). A whole drive cannot be chosen as the notes folder.
+* Paths of 260 characters or more are not supported.
+* Notes inside OneDrive or Dropbox work, but keep them "always on this device": a note that is only a cloud placeholder may be slow to open.
+* Saving a note rewrites it in one piece: a file with mixed line endings is saved with its most common ending. (Ticking a task from the panel never does this; it changes one character.)
 * The ANSI encoding is assumed to be Windows-1252 (Western European).
+* Windows Controlled Folder Access can block saves into `Documents` until you allow `Trimple.exe`; Windows Smart App Control blocks unsigned programs outright (turn it off or ask for a signed build).
 * No find/replace inside a note yet, no due dates yet (the `!1 #label` format leaves room for `@2026-12-31`).
 * The old PowerShell version in `legacy-powershell/` still works but is no longer developed.

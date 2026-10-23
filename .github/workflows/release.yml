@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p dist
           for arch in amd64 arm64; do
-            GOOS=windows GOARCH=$arch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=${GITHUB_REF_NAME}" -o dist/Trimple-windows-$arch.exe ./cmd/trimple
+            GOOS=windows GOARCH=$arch go build -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=${GITHUB_REF_NAME}" -o dist/Trimple-windows-$arch.exe ./cmd/trimple
           done
           cp dist/Trimple-windows-amd64.exe dist/Trimple.exe
           cd dist && sha256sum *.exe > SHA256SUMS.txt

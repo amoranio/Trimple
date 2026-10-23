@@ -78,7 +78,7 @@ func listFiles(root string) (files []found, truncated bool) {
 	if err != nil {
 		realRoot = root
 	}
-	seenDirs := map[string]bool{}
+	seenDirs := map[string]bool{realRoot: true} // the root itself counts as visited, so a loop back into it is skipped
 	visited := 0
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
