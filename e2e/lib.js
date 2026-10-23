@@ -141,6 +141,7 @@ async function launchBrowser() {
 /** Open the app in a fresh context; collects console errors and page exceptions in page.errors. */
 async function openPage(browser, app, { viewport = { width: 1280, height: 800 }, colorScheme, wait = true } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, acceptDownloads: false });
+  context.setDefaultTimeout(10000);
   const page = await context.newPage();
   page.errors = [];       // uncaught exceptions + console.error that are not plain HTTP-status noise
   page.netNoise = [];     // 'Failed to load resource: 4xx' lines (expected when tests provoke API errors)
