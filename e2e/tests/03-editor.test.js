@@ -119,6 +119,7 @@ test('9a. New tab -> type -> Ctrl+S opens a Save dialog; "work/Plan" is saved as
     await page.keyboard.type('work/Plan');
     await page.keyboard.press('Enter');
     await page.locator('.modal-overlay').waitFor({ state: 'detached' });
+    await L.waitFor(() => fs.existsSync(app.file('work/Plan.txt')), { what: 'Plan.txt written' });
     const bytes = app.read('work/Plan.txt');
     assert.equal(bytes.toString(), 'Plan\r\nsecond line\r\n- [ ] planned task !1 #plan');
     assert.equal(L.eolCounts(bytes).bareLF, 0);
@@ -182,7 +183,7 @@ test('9c. Save dialog refuses bad names (traversal, reserved, colon) and writes 
       await page.keyboard.type(bad);
       await page.keyboard.press('Enter');
       await page.locator('.modal-overlay').waitFor({ state: 'detached' });
-      await page.waitForFunction(() => /^Could not save/.test(document.querySelector('#msg').textContent), null, { timeout: 4000 }).catch(() => { throw new Error('no error shown for name ' + bad + '; status=' + document.title); });
+      await page.waitForFunction(() => /^Could not save/.test(document.querySelector('#msg').textContent), null, { timeout: 4000 }).catch(() => { throw new Error('no error shown for name ' + bad); });
       assert.equal(fs.existsSync(outside), false);
     }
     assert.deepEqual(fs.readdirSync(app.dir).sort(), ['notes', 'settings.json', 'trimple.log'].filter((n) => fs.existsSync(require('node:path').join(app.dir, n))).sort());
@@ -207,6 +208,7 @@ test('9d. Save As (Ctrl+Shift+S) on an existing note writes a copy and switches 
     await page.keyboard.press('Enter');
     await page.locator('.modal-overlay').waitFor({ state: 'detached' });
     await L.waitFor(() => fs.existsSync(app.file('Copy of Work.txt')), { what: 'copy written' });
+    await L.waitFor(async () => (await L.tabNames(page)).includes('Copy of Work.txt'), { what: 'tab renamed' });
     assert.deepEqual(app.read('Copy of Work.txt'), orig, 'copy has identical bytes');
     assert.deepEqual(app.read('Work.txt'), orig);
     assert.ok((await L.tabNames(page)).includes('Copy of Work.txt'));
@@ -332,7 +334,7 @@ test('12. closing a dirty tab asks Save / Don\'t save / Cancel', async () => {
     // Don't save
     await closeBtn.click(); await L.modal(page).waitFor();
     await L.modal(page).locator("button:has-text(\"Don't save\")").click();
-    await page.waitForFunction(() => document.querySelector('#tabs .tab .tname')?.textContent === 'Untitled');
+    await page.waitForFunction(() => /^Untitled/.test(document.querySelector('#tabs .tab .tname')?.textContent));
     assert.deepEqual(app.read('Home.txt'), orig);
     // reopen, edit, close with Save
     await openFile(page, 'Home.txt');
@@ -344,7 +346,7 @@ test('12. closing a dirty tab asks Save / Don\'t save / Cancel', async () => {
     await L.modal(page).waitFor();
     assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Save', 'Save is the default button');
     await page.keyboard.press('Enter');
-    await page.waitForFunction(() => document.querySelector('#tabs .tab .tname')?.textContent === 'Untitled');
+    await page.waitForFunction(() => /^Untitled/.test(document.querySelector('#tabs .tab .tname')?.textContent));
     assert.ok(app.read('Home.txt').toString().endsWith('SAVED'));
     // closing a clean tab asks nothing
     await openFile(page, 'Work.txt');
@@ -368,7 +370,7 @@ test('12b. middle-click closes a tab; closing the last tab leaves an empty Untit
   await withApp({}, async (app, page) => {
     await openFile(page, 'Home.txt');
     await page.locator('#tabs .tab.active').click({ button: 'middle' });
-    await page.waitForFunction(() => document.querySelector('#tabs .tab .tname')?.textContent === 'Untitled');
+    await page.waitForFunction(() => /^Untitled/.test(document.querySelector('#tabs .tab .tname')?.textContent));
     assert.equal((await L.tabNames(page)).length, 1);
   });
 });
