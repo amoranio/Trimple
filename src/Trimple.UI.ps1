@@ -9,7 +9,7 @@ if (-not ('TrimpleNative' -as [type])) {
     $script:CompileRefs = @('System.Windows.Forms', 'System.Drawing')
     if ($PSVersionTable.PSVersion.Major -ge 6) {
         # .NET (Core) splits the framework into many small assemblies the C# below touches indirectly.
-        $script:CompileRefs += @('System.ComponentModel.Primitives', 'System.Drawing.Primitives', 'System.Windows.Forms.Primitives', 'System.Runtime', 'System.Collections', 'netstandard')
+        $script:CompileRefs += @('System.ComponentModel.Primitives', 'System.Drawing.Primitives', 'System.Windows.Forms.Primitives', 'System.Drawing.Common', 'System.Runtime', 'System.Collections', 'netstandard')
     }
     Add-Type -ReferencedAssemblies $script:CompileRefs -TypeDefinition @'
 using System;

@@ -74,11 +74,21 @@ powershell -File tests\Run-Tests.ps1        # core logic, also works with pwsh o
 powershell -File Trimple.ps1 -SelfTest      # builds the real window headlessly and drives it (Windows only)
 ```
 
-CI runs both on Windows PowerShell 5.1 and PowerShell 7, plus the core tests on Linux.
+CI (GitHub Actions) runs on every push:
+
+| | Windows PowerShell 5.1 | PowerShell 7 | Linux (PowerShell 7) |
+|---|---|---|---|
+| Core + adversarial tests | gating | gating | gating |
+| Headless UI self-test | **gating** | informational (may fail) | n/a |
+
+Windows PowerShell 5.1 is the supported runtime for the app itself: it is what `Trimple.bat` starts and it ships with Windows. Running `Trimple.ps1` under PowerShell 7 is untested.
 
 ## Known limits (first cut)
 
-- Only `.txt` files; hidden folders and files over 5 MB are skipped, and at most 2000 files are scanned.
+- Only `.txt` files; hidden folders, symlinked/junction folders and files over 5 MB are skipped, and at most 2000 files are scanned.
+- Files with bytes that are invalid for their encoding (or NUL characters) open **read-only**, and ticking their tasks is refused, so Trimple can never silently alter them. Edit those in Notepad.
+- Tasks must start the label with a letter: `#work` is a label, `#123` (an issue number) is not.
+- The UI has been exercised headlessly in CI, not by a person clicking through it yet. Expect rough edges on first real use (high-DPI multi-monitor setups in particular); `Trimple.log` records errors.
 - No find/replace inside a note yet.
 - A file with mixed line endings is saved with its most common one.
 - No due dates yet; the `!1 #label` format leaves room to add `@2026-12-31` later.
