@@ -6,7 +6,12 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 if (-not ('TrimpleNative' -as [type])) {
-    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+    $script:CompileRefs = @('System.Windows.Forms', 'System.Drawing')
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # .NET (Core) splits the framework into many small assemblies the C# below touches indirectly.
+        $script:CompileRefs += @('System.ComponentModel.Primitives', 'System.Drawing.Primitives', 'System.Windows.Forms.Primitives', 'System.Runtime', 'System.Collections', 'netstandard')
+    }
+    Add-Type -ReferencedAssemblies $script:CompileRefs -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
