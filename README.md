@@ -6,7 +6,7 @@ Notepad with tabs, a dark theme, and a task panel. Your notes stay plain `.txt` 
 
 ## Get it
 
-Download `Trimple.exe` from the latest [release](../../releases) (or from the **build-windows** artifact of any CI run), put it anywhere, and double-click it.
+Download `Trimple.exe` from the latest [release](../../releases) once one is published, or right now from the **Trimple-windows-amd64** artifact at the bottom of any green run on the [Actions](../../actions) page (GitHub login needed; it arrives zipped). Put the exe anywhere and double-click it.
 
 * Windows may show *"Windows protected your PC"* the first time because the file is not code-signed. Click **More info → Run anyway**.
 * On first run pick the folder that holds your notes, or let Trimple create `Documents\Trimple Notes` with a short `Welcome.txt`.
