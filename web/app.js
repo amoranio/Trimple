@@ -24,7 +24,7 @@
     token: '', os: '', canNotepad: false,
     settings: null, state: null, folder: '',
     docs: [], active: null, nextId: 1, untitled: 0,
-    modal: false, stateSeq: 0, connected: false, refreshing: null, lastOwnWrite: 0, busyTask: false,
+    modal: false, stateSeq: 0, connected: false, refreshing: null, lastOwnWrite: 0, busyTasks: new Set(),
   };
 
   const params = new URLSearchParams(location.search);
@@ -229,10 +229,13 @@
   }
 
   async function toggleTask(t) {
-    if (S.busyTask) return; // ignore double-clicks while the first one is being applied
+    // ignore a repeat click on the same task while its first click is still being applied;
+    // ticking different tasks in quick succession must all go through
+    const key = t.path + '|' + t.line;
+    if (S.busyTasks.has(key)) return;
     const doc = findDoc(t.path);
     if (doc && doc.dirty) { say(`Save "${doc.name}" first - it has unsaved changes.`, true); return; }
-    S.busyTask = true;
+    S.busyTasks.add(key);
     try {
       S.lastOwnWrite = Date.now();
       try { await api('POST', '/api/task', { path: t.path, line: t.line, done: !t.done, raw: t.raw }); }
@@ -243,7 +246,7 @@
       }
       await refreshState();
       if (doc && !doc.dirty) await reloadDoc(doc);
-    } finally { S.busyTask = false; }
+    } finally { S.busyTasks.delete(key); }
   }
 
   // ------------------------------------------------------------------ documents

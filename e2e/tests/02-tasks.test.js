@@ -340,3 +340,28 @@ test('4g. opening a note from the Files list starts at the top (like Notepad), n
     assert.ok(st.scrollTop < 30, 'scrollTop after opening: ' + st.scrollTop);
   });
 });
+
+test('3h. ticking different tasks in quick succession never drops one, even when the server is slow', async () => {
+  await withApp({}, async (app, page) => {
+    const orig = app.read('Home.txt');
+    // make every tick take 600 ms so the second click lands while the first is still in flight
+    await page.route('**/api/task', async (route) => { await new Promise((r) => setTimeout(r, 600)); await route.continue(); });
+    await page.check('#showdone');
+    await L.taskRow(page, 'Renew parking pass').locator('input.tick').click();
+    await L.taskRow(page, 'Buy printer ink').locator('input.tick').first().click();
+    await L.waitFor(() => {
+      const t = app.read('Home.txt').toString();
+      return /- \[x\] Renew parking pass/.test(t) && /- \[x\] Buy printer ink/.test(t);
+    }, { what: 'both ticks applied', timeout: 10000 });
+    assert.equal(L.diffBytes(orig, app.read('Home.txt')).length, 2, 'exactly the two checkboxes changed');
+    // a repeat click on the SAME task while its first click is in flight is ignored (no bogus stale error)
+    await page.unroute('**/api/task');
+    await page.route('**/api/task', async (route) => { await new Promise((r) => setTimeout(r, 600)); await route.continue(); });
+    const row = L.taskRow(page, 'Renew parking pass').locator('input.tick');
+    await row.click();
+    await row.click({ force: true }).catch(() => {});
+    await L.waitFor(() => /- \[ \] Renew parking pass/.test(app.read('Home.txt').toString()), { what: 'unticked once', timeout: 10000 });
+    await L.sleep(1500);
+    assert.doesNotMatch(await page.textContent('#msg'), /changed on disk/, 'a double click must not report a stale task');
+  });
+});
