@@ -1,0 +1,10 @@
+# Project notes
+
+- [ ] Draft API spec !1 #dev
+- [ ] Fix flaky build !2 #dev
+
+```
+- [ ] this is inside a code fence and must be ignored
+```
+
+See https://example.com/page#section for details.

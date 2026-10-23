@@ -2,15 +2,15 @@
 
 Notepad with tabs, a dark theme, and a task panel. Your notes stay plain `.txt` files in a folder, so Notepad can still open every one of them.
 
-Nothing to install. Trimple is a PowerShell script that runs on the Windows PowerShell already built into Windows 10 and 11.
+**One file, nothing to install.** Trimple is a single `Trimple.exe` (about 8 MB). Double-click it: a clean app-style window opens (using the Microsoft Edge that ships with Windows 10/11, or Chrome), and everything runs locally on your PC. Nothing is sent anywhere.
 
-## Run it
+## Get it
 
-1. Download or clone this repo anywhere (a USB stick works too).
-2. Double-click **`Trimple.bat`**.
-3. On first run, pick the folder that holds your notes. Cancel to use `Documents\Trimple Notes`, which gets a short `Welcome.txt`.
+Download `Trimple.exe` from the latest [release](../../releases) (or from the **build-windows** artifact of any CI run), put it anywhere, and double-click it.
 
-`Trimple.bat some-note.txt` opens a file straight into a tab. If something goes wrong, run **`Trimple-Debug.bat`** to keep the console visible, or check `Trimple.log` beside the script.
+* Windows may show *"Windows protected your PC"* the first time because the file is not code-signed. Click **More info → Run anyway**.
+* On first run pick the folder that holds your notes, or let Trimple create `Documents\Trimple Notes` with a short `Welcome.txt`.
+* Closing the window quits Trimple (after a few seconds). Double-clicking it again while it is running just opens another window on the same instance.
 
 ## Writing tasks
 
@@ -26,69 +26,86 @@ Any line shaped like a checkbox becomes a task:
 |---|---|
 | `[ ]` / `[x]` | open / done (`-`, `*` or `+` bullets all work) |
 | `!1` `!2` `!3` | priority, 1 is highest (optional) |
-| `#word` | label, as many as you like (optional) |
+| `#word` | label; must start with a letter, so `#123` is not a label (optional) |
 
-Tasks inside ``` code fences are ignored, and `#` inside a URL is not a label.
+Tasks inside ``` code fences are ignored, and a `#` inside a URL is not a label.
 
 ## The task panel
 
-- Groups by **priority**, **label** or **file**; filter by label; search; show or hide completed tasks.
-- **Click the box** to tick a task. Only that one character in the file changes; encoding, BOM and line endings are kept as they were.
-- **Click the text** to open the file at that line.
-- A tick is refused if the file has unsaved edits in a tab, or if the line moved on disk since the panel last read it.
-- The folder is rescanned every 2 seconds, so edits made in Notepad show up on their own. If you have unsaved edits in a tab when its file changes, you get a bar with *Reload from disk* / *Keep mine* instead of losing either side.
+* Groups by **priority**, **label** or **file**; filter by label; search; show or hide completed tasks; open counts at the top.
+* **Click the box** to tick a task. Only that one character in the file changes; encoding, BOM and line endings are kept byte for byte.
+* **Click the text** to open the note with the cursor on that line.
+* A tick is refused if the note has unsaved edits in a tab, or if the line moved on disk since the panel last read it.
+* Edits made in Notepad (or by a sync client) show up within about 2 seconds. If you have unsaved edits when the file changes underneath you, a bar offers *Reload from disk* / *Keep mine*; neither side is lost silently.
+* **Open in Notepad** (toolbar, `Alt+P`) opens the current note in Notepad.
+* Unsaved text is also kept as a draft, so closing the window by accident does not lose it.
 
 ## Shortcuts
 
+Browsers reserve `Ctrl+N`, `Ctrl+W`, `Ctrl+T` and `Ctrl+Tab` for themselves, so Trimple uses these instead:
+
 | | |
 |---|---|
-| Ctrl+N / O / S / W | new tab, open, save, close tab |
-| Ctrl+Shift+S / O | save as, open folder |
-| Ctrl+Shift+N | open the current file in Notepad |
-| Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
-| Ctrl+Shift+T | insert `- [ ] ` at the start of the line |
-| Ctrl+Enter | tick/untick the task on the current line |
-| Ctrl+B | show/hide task panel |
-| Ctrl+Shift+D | dark / light |
-| Ctrl+`+` / Ctrl+`-` / Ctrl+0 | font size |
-| F5 | rescan the folder |
+| `Ctrl+S` / `Ctrl+Shift+S` | save / save as |
+| `Ctrl+O` | quick-open a note (type to filter) |
+| `Alt+N` / `Alt+W` | new tab / close tab |
+| `Alt+1`…`9`, `Ctrl+Alt+←/→` | switch tabs |
+| `Alt+T` | insert `- [ ] ` at the start of the line |
+| `Ctrl+Enter` | tick/untick the task on the current line |
+| `Ctrl+B` | show/hide the task panel |
+| `Alt+D` | dark / light |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | text size |
+| `Alt+P` | open in Notepad |
+| `F5` | rescan |
+
+## Safety rules (why you can trust it with your notes)
+
+* Notes are only ever rewritten through a write-to-temp-then-rename step, so a crash cannot leave half a file.
+* A file whose bytes could not be reproduced exactly (stray invalid bytes, NUL characters) opens **read-only** and its tasks cannot be ticked; edit those in Notepad.
+* Saving never silently changes a file's encoding: an old ANSI note that gains a character it cannot store asks before becoming UTF-8.
+* Saving a note that changed on disk since you opened it asks first.
+* Saving an untouched note does nothing, so mixed line endings are not normalised behind your back.
+
+## Security
+
+The app is a local web server, so it is locked down: it listens on `127.0.0.1` only, every request needs a random per-run token, requests with a foreign `Host` (DNS rebinding) or `Origin` (cross-site) are refused, there are no CORS headers, the page has a strict Content-Security-Policy, and file paths from the page can never leave the notes folder (no `..`, drive letters, reserved names, alternate streams or symlink escapes).
+
+## Settings, logs and files Trimple creates
+
+* `%AppData%\Trimple\settings.json`: your preferences and open tabs.
+* `%AppData%\Trimple\trimple.log` and `instance.json` (port/token of the running copy, deleted on exit).
+* `*.trimple-tmp` appears next to a note for a moment while it is being saved.
+
+Flags (run `Trimple.exe -h` from a terminal): `-folder`, `-config`, `-port`, `-no-browser`, `-keep-alive`, `-version`. Extra arguments are notes to open, so `Trimple.exe todo.txt` works from a shortcut or "Open with".
+
+## Build and test it yourself
+
+```
+go build -o Trimple.exe ./cmd/trimple                      # needs Go 1.22+
+go build -ldflags "-s -w -H=windowsgui" -o Trimple.exe ./cmd/trimple   # no console window (what releases use)
+go test -race ./...                                        # core + server tests
+cd e2e && npm ci && npm test                               # drives the real UI in a real browser
+```
+
+CI runs all of this on Windows and Linux for every push, builds `Trimple.exe`, smoke-tests the built exe on a real Windows runner, and drives the UI with Edge on Windows.
 
 ## Layout
 
 ```
-Trimple.ps1          entry point (relaunches itself single-threaded if needed)
-Trimple.bat          double-click launcher
-src/Trimple.Core.psm1   file I/O, parsing, index, grouping, settings (no UI)
-src/Trimple.UI.ps1      WinForms front end
-src/Trimple.SelfTest.ps1  headless UI check used by CI
-tests/Run-Tests.ps1     core tests (no dependencies)
-tests/sample-notes/     fixtures with mixed line endings
+cmd/trimple/        entry point, single-instance, window launch
+internal/notes/     encoding, task parsing, safe rewrite, folder index (no UI/HTTP)
+internal/server/    local HTTP API, security guards, live updates
+internal/config/    settings file
+web/                the embedded UI (plain HTML/CSS/JS, no build step)
+testdata/           sample notes with deliberate CRLF/LF mixes
+e2e/                browser tests (Playwright)
+legacy-powershell/  the first version (PowerShell + WinForms), kept as a fallback
 ```
 
-Settings (folder, theme, font, open tabs, window size) are saved in `Trimple.settings.json` next to the script, or in `%APPDATA%\Trimple` if that folder is read-only.
+## Known limits
 
-## Tests
-
-```
-powershell -File tests\Run-Tests.ps1        # core logic, also works with pwsh on any OS
-powershell -File Trimple.ps1 -SelfTest      # builds the real window headlessly and drives it (Windows only)
-```
-
-CI (GitHub Actions) runs on every push:
-
-| | Windows PowerShell 5.1 | PowerShell 7 | Linux (PowerShell 7) |
-|---|---|---|---|
-| Core + adversarial tests | gating | gating | gating |
-| Headless UI self-test | **gating** | informational (may fail) | n/a |
-
-Windows PowerShell 5.1 is the supported runtime for the app itself: it is what `Trimple.bat` starts and it ships with Windows. Running `Trimple.ps1` under PowerShell 7 is untested.
-
-## Known limits (first cut)
-
-- Only `.txt` files; hidden folders, symlinked/junction folders and files over 5 MB are skipped, and at most 2000 files are scanned.
-- Files with bytes that are invalid for their encoding (or NUL characters) open **read-only**, and ticking their tasks is refused, so Trimple can never silently alter them. Edit those in Notepad.
-- Tasks must start the label with a letter: `#work` is a label, `#123` (an issue number) is not.
-- The UI has been exercised headlessly in CI, not by a person clicking through it yet. Expect rough edges on first real use (high-DPI multi-monitor setups in particular); `Trimple.log` records errors.
-- No find/replace inside a note yet.
-- A file with mixed line endings is saved with its most common one.
-- No due dates yet; the `!1 #label` format leaves room to add `@2026-12-31` later.
+* Windows 10/11 is the target. Open in Notepad is Windows-only; the rest runs anywhere Go does.
+* `.txt` only; hidden and symlinked/junction folders and files over 5 MB are skipped; at most 2000 notes are scanned (pick a smaller folder if you hit it).
+* The ANSI encoding is assumed to be Windows-1252 (Western European).
+* No find/replace inside a note yet, no due dates yet (the `!1 #label` format leaves room for `@2026-12-31`).
+* The old PowerShell version in `legacy-powershell/` still works but is no longer developed.

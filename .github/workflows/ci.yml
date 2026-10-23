@@ -8,8 +8,104 @@ permissions:
   contents: read
 
 jobs:
-  windows:
+  go:
+    name: go test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - name: Cross-vet for Windows
+        if: runner.os == 'Linux'
+        run: GOOS=windows go vet ./...
+      - name: Tests (race detector on Linux)
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - name: Tests
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./...
+
+  build-windows:
+    name: build and smoke-test Trimple.exe
     runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: Build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=ci-${{ github.sha }}" -o dist/Trimple.exe ./cmd/trimple
+          Get-Item dist/Trimple.exe | Select-Object Name, Length
+      - name: Smoke test the real exe
+        shell: pwsh
+        run: ./scripts/smoke-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trimple-windows-amd64
+          path: dist/Trimple.exe
+          if-no-files-found: error
+
+  e2e:
+    name: browser tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the app
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/Trimple.exe ./cmd/trimple
+          else
+            go build -trimpath -o dist/trimple ./cmd/trimple
+          fi
+      - name: Install test dependencies
+        working-directory: e2e
+        run: npm ci
+      - name: Run browser tests (Edge on Windows, Chrome on Linux)
+        working-directory: e2e
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then export TRIMPLE_BIN="$GITHUB_WORKSPACE/dist/Trimple.exe"; else export TRIMPLE_BIN="$GITHUB_WORKSPACE/dist/trimple"; fi
+          npm test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screenshots-${{ matrix.os }}
+          path: e2e/test-results
+          if-no-files-found: ignore
+
+  legacy-powershell:
+    name: legacy PowerShell app
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: legacy-powershell
     steps:
       - uses: actions/checkout@v4
       - name: Core tests (Windows PowerShell 5.1)
@@ -17,35 +113,10 @@ jobs:
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force
           ./tests/Run-Tests.ps1
-      - name: Adversarial tests (Windows PowerShell 5.1, no timing limits)
-        shell: powershell
-        run: |
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          ./tests/Adversarial.Tests.ps1 -SkipPerf
-      - name: Core + adversarial tests (PowerShell 7)
-        shell: pwsh
-        run: |
-          ./tests/Run-Tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tests/Adversarial.Tests.ps1
+          ./tests/Adversarial.Tests.ps1 -SkipPerf
       - name: UI self-test (Windows PowerShell 5.1)
         shell: powershell
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force
           ./Trimple.ps1 -SelfTest
-      - name: UI self-test (PowerShell 7, informational)
-        # Trimple.bat launches Windows PowerShell 5.1, which is the supported UI runtime and is gated above.
-        continue-on-error: true
-        shell: pwsh
-        run: ./Trimple.ps1 -SelfTest
-
-  linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Core + adversarial tests (PowerShell 7 on Linux)
-        shell: pwsh
-        run: |
-          ./tests/Run-Tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tests/Adversarial.Tests.ps1

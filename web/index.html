@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trimple</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar" role="toolbar" aria-label="Main">
+      <span class="brand">Trimple</span>
+      <button id="btn-folder" title="Choose the notes folder">Folder</button>
+      <button id="btn-new" title="New note (Alt+N)">New</button>
+      <button id="btn-open" title="Open a note (Ctrl+O)">Open</button>
+      <button id="btn-save" title="Save (Ctrl+S)">Save</button>
+      <button id="btn-notepad" title="Open this file in Notepad (Alt+P)">Open in Notepad</button>
+      <span class="spacer"></span>
+      <button id="btn-panel" title="Show or hide the task panel (Ctrl+B)" aria-pressed="true">Tasks</button>
+      <button id="btn-wrap" title="Word wrap" aria-pressed="true">Wrap</button>
+      <button id="btn-smaller" title="Smaller text (Ctrl+-)" aria-label="Smaller text">A-</button>
+      <button id="btn-bigger" title="Bigger text (Ctrl+=)" aria-label="Bigger text">A+</button>
+      <button id="btn-theme" title="Switch dark / light (Alt+D)">Theme</button>
+    </header>
+
+    <div id="banner" hidden></div>
+
+    <div id="main">
+      <aside id="side" aria-label="Tasks and files">
+        <section id="tasks">
+          <div class="side-head">
+            <h2>Tasks</h2>
+            <span id="counts" class="muted"></span>
+          </div>
+          <div class="controls">
+            <select id="group" aria-label="Group tasks by">
+              <option value="priority">By priority</option>
+              <option value="label">By label</option>
+              <option value="file">By file</option>
+            </select>
+            <select id="label" aria-label="Filter by label"><option value="">All labels</option></select>
+          </div>
+          <input id="search" type="search" placeholder="Search tasks" aria-label="Search tasks" autocomplete="off">
+          <label class="check"><input id="showdone" type="checkbox"> Show completed</label>
+          <ul id="tasklist" aria-label="Task list"></ul>
+        </section>
+        <section id="files">
+          <div class="side-head">
+            <h2>Files</h2>
+            <span id="filecount" class="muted"></span>
+          </div>
+          <ul id="filelist" aria-label="Notes in this folder"></ul>
+          <div id="folderpath" class="muted" title=""></div>
+        </section>
+      </aside>
+      <div id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize panel" tabindex="0"></div>
+      <main id="work">
+        <div id="tabs" role="tablist" aria-label="Open notes"></div>
+        <div id="notice" hidden>
+          <span id="notice-text"></span>
+          <span class="spacer"></span>
+          <button id="notice-reload">Reload from disk</button>
+          <button id="notice-keep">Keep mine</button>
+        </div>
+        <div id="editors"></div>
+      </main>
+    </div>
+
+    <footer id="status">
+      <span id="msg" role="status" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <span id="pos"></span>
+      <span id="enc"></span>
+      <span id="eol"></span>
+    </footer>
+  </div>
+  <div id="modal-root"></div>
+  <script src="app.js"></script>
+</body>
+</html>
