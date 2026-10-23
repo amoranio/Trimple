@@ -62,7 +62,7 @@ function Write-Raw([string]$Path, [byte[]]$Bytes) { [System.IO.File]::WriteAllBy
 function Read-Raw([string]$Path) { , [System.IO.File]::ReadAllBytes($Path) }
 function Utf8([string]$s) { , (New-Object System.Text.UTF8Encoding($false)).GetBytes($s) }
 function U([int[]]$Codes) { -join ($Codes | ForEach-Object { [char]$_ }) }
-function Cat([byte[]]$A, [byte[]]$B) { $o = New-Object byte[] ($A.Length + $B.Length); [Array]::Copy($A, 0, $o, 0, $A.Length); [Array]::Copy($B, 0, $o, $A.Length, $B.Length); , $o }
+function Join-Bytes([byte[]]$A, [byte[]]$B) { $o = New-Object byte[] ($A.Length + $B.Length); [Array]::Copy($A, 0, $o, 0, $A.Length); [Array]::Copy($B, 0, $o, $A.Length, $B.Length); , $o }
 function Names($Items) { @($Items | ForEach-Object { $_.Name }) }
 
 $E_ACUTE = [string][char]0xE9
@@ -278,14 +278,14 @@ Test 'invalid UTF-8 sequences fall back to ansi and are byte-exact on round trip
 Test 'every high byte value survives an ansi round trip' {
     $all = New-Object byte[] 128
     for ($i = 0; $i -lt 128; $i++) { $all[$i] = 128 + $i }
-    $b = Cat ([byte[]](0x61, 0x0A)) $all
+    $b = Join-Bytes ([byte[]](0x61, 0x0A)) $all
     $dec = ConvertFrom-TrimpleBytes -Bytes $b
     Assert-Equal $dec.Kind 'ansi'
     Assert-Bytes (ConvertTo-TrimpleBytes -Text $dec.Text -Kind $dec.Kind).Bytes $b
 }
 Test 'utf16 with surrogate pairs (emoji) round trips' {
-    $le = Cat ([byte[]](0xFF, 0xFE)) ([System.Text.Encoding]::Unicode.GetBytes("- [ ] $EMOJI`r`n"))
-    $be = Cat ([byte[]](0xFE, 0xFF)) ([System.Text.Encoding]::BigEndianUnicode.GetBytes("- [ ] $EMOJI`r`n"))
+    $le = Join-Bytes ([byte[]](0xFF, 0xFE)) ([System.Text.Encoding]::Unicode.GetBytes("- [ ] $EMOJI`r`n"))
+    $be = Join-Bytes ([byte[]](0xFE, 0xFF)) ([System.Text.Encoding]::BigEndianUnicode.GetBytes("- [ ] $EMOJI`r`n"))
     foreach ($b in @($le, $be)) {
         $dec = ConvertFrom-TrimpleBytes -Bytes $b
         Assert-True ($dec.Text.Contains($EMOJI))
@@ -303,7 +303,7 @@ function Assert-RefusedNotCorrupted([byte[]]$Bytes, [string]$Why) {
     Assert-Bytes ([System.IO.File]::ReadAllBytes($p)) $Bytes "${Why}: file must be untouched"
 }
 Test 'utf16le with an odd trailing byte is flagged read-only and a tick is refused, bytes untouched' {
-    Assert-RefusedNotCorrupted ([byte[]]((Cat ([byte[]](0xFF, 0xFE)) ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a"))) + [byte[]](0x62))) 'odd trailing byte'
+    Assert-RefusedNotCorrupted ([byte[]]((Join-Bytes ([byte[]](0xFF, 0xFE)) ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a"))) + [byte[]](0x62))) 'odd trailing byte'
 }
 Test 'utf16 with a lone surrogate is flagged read-only (LE and BE)' {
     Assert-RefusedNotCorrupted ([byte[]](0xFF, 0xFE, 0x2D, 0x00, 0x20, 0x00, 0x5B, 0x00, 0x20, 0x00, 0x5D, 0x00, 0x20, 0x00, 0x00, 0xD8, 0x62, 0x00)) 'lone surrogate LE'
@@ -317,7 +317,7 @@ Test 'a file containing NUL characters is flagged read-only (an edit control wou
 }
 Test 'bom-less utf16 and utf32 bytes survive a round trip' {
     $noBom = [System.Text.Encoding]::Unicode.GetBytes("- [ ] a`r`n")
-    $utf32 = Cat ([byte[]](0xFF, 0xFE, 0x00, 0x00)) ([System.Text.Encoding]::UTF32.GetBytes("- [ ] a`r`n"))
+    $utf32 = Join-Bytes ([byte[]](0xFF, 0xFE, 0x00, 0x00)) ([System.Text.Encoding]::UTF32.GetBytes("- [ ] a`r`n"))
     foreach ($b in @($noBom, $utf32)) {
         $dec = ConvertFrom-TrimpleBytes -Bytes $b
         Assert-Bytes (ConvertTo-TrimpleBytes -Text $dec.Text -Kind $dec.Kind).Bytes $b
@@ -335,7 +335,7 @@ Test 'fuzz: 400 seeded random byte strings, every BOM flavour: a file is either 
         $len = $rng.Next(0, 40)
         $body = New-Object byte[] $len
         $rng.NextBytes($body)
-        $b = Cat $prefixes[$n % $prefixes.Count] $body
+        $b = Join-Bytes $prefixes[$n % $prefixes.Count] $body
         [System.IO.File]::WriteAllBytes($p, $b)
         $f = Read-TrimpleFile -Path $p
         $enc = ConvertTo-TrimpleBytes -Text $f.Text -Kind $f.Kind
@@ -365,15 +365,17 @@ Test 'paths with brackets, spaces, wildcards, dollar signs and apostrophes' {
     $d = New-TempDir
     $sub = Join-Path $d '[proj] (1)'
     New-Item -ItemType Directory -Path $sub | Out-Null
+    $made = 0
     foreach ($name in @('my [notes] 1.txt', 'a b  c.txt', 'what*.txt', "it's `$home.txt", 'x`y.txt', ('caf' + $E_ACUTE + ' ' + $EMOJI + '.txt'))) {
-        if ($script:OnWindows -and $name -match '\*') { continue }
+        if ($script:OnWindows -and $name -match '\*') { continue }      # '*' is not a legal file name character on Windows
+        $made++
         $orig = Utf8 "- [ ] one`r`n- [ ] two`r`n"
         $p = New-Note $sub $name $orig
         Set-TrimpleTaskState -Path $p -Line 2 -Done $true -ExpectedRaw '- [ ] two'
         $new = Read-Raw $p
         Assert-Equal (Count-ByteDiffs $new $orig) 1 $name
     }
-    Assert-Equal @(Get-ChildItem -LiteralPath $sub -Force).Count 6 'no temp files left behind'
+    Assert-Equal @(Get-ChildItem -LiteralPath $sub -Force).Count $made 'no temp files left behind'
 }
 Test 'ExpectedRaw mismatch variants are all refused and leave the file untouched' {
     $d = New-TempDir
@@ -425,9 +427,9 @@ Test 'ticking a task in utf8-BOM / utf16 files that contain invalid sequences ch
     $d = New-TempDir
     $files = @{
         'bom-bad.txt'    = [byte[]](0xEF, 0xBB, 0xBF, 0x2D, 0x20, 0x5B, 0x20, 0x5D, 0x20, 0x61, 0x0A, 0x62, 0xFF, 0x0A)
-        'u16-odd.txt'    = (Cat ([byte[]](0xFF, 0xFE)) (Cat ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a`r`n")) ([byte[]](0x62))))
-        'u16-lone.txt'   = (Cat ([byte[]](0xFF, 0xFE)) (Cat ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a`r`n")) ([byte[]](0x00, 0xD8, 0x61, 0x00))))
-        'u16be-lone.txt' = (Cat ([byte[]](0xFE, 0xFF)) (Cat ([System.Text.Encoding]::BigEndianUnicode.GetBytes("- [ ] a`r`n")) ([byte[]](0xDC, 0x00))))
+        'u16-odd.txt'    = (Join-Bytes ([byte[]](0xFF, 0xFE)) (Join-Bytes ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a`r`n")) ([byte[]](0x62))))
+        'u16-lone.txt'   = (Join-Bytes ([byte[]](0xFF, 0xFE)) (Join-Bytes ([System.Text.Encoding]::Unicode.GetBytes("- [ ] a`r`n")) ([byte[]](0x00, 0xD8, 0x61, 0x00))))
+        'u16be-lone.txt' = (Join-Bytes ([byte[]](0xFE, 0xFF)) (Join-Bytes ([System.Text.Encoding]::BigEndianUnicode.GetBytes("- [ ] a`r`n")) ([byte[]](0xDC, 0x00))))
     }
     $bad = @()
     foreach ($name in ($files.Keys | Sort-Object)) {
@@ -872,7 +874,7 @@ Test 'valid JSON of the wrong top-level shape yields defaults and never throws' 
     }
 }
 Test 'UTF-8 BOM in the settings file is accepted' {
-    $s = Import-Json '' (Cat ([byte[]](0xEF, 0xBB, 0xBF)) (Utf8 '{"Theme":"light","FontSize":14}'))
+    $s = Import-Json '' (Join-Bytes ([byte[]](0xEF, 0xBB, 0xBF)) (Utf8 '{"Theme":"light","FontSize":14}'))
     Assert-Equal $s.Theme 'light'
     Assert-Equal $s.FontSize 14
 }

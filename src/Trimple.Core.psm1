@@ -23,8 +23,16 @@ function Get-TrimpleAnsiEncoding {
     return [System.Text.Encoding]::GetEncoding(28591)
 }
 
+# .NET exceptions raised through New-Object / method calls arrive wrapped; look at the real one.
+function Get-TrimpleRootException {
+    param($ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    while ($null -ne $ex.InnerException) { $ex = $ex.InnerException }
+    return $ex
+}
+
 function Read-TrimpleBytes {
-    param([Parameter(Mandatory)][string]$Path, [int]$Retries = 4)
+    param([Parameter(Mandatory)][string]$Path, [int]$Retries = 6)
     $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
     for ($attempt = 1; $attempt -le $Retries; $attempt++) {
@@ -37,11 +45,11 @@ function Read-TrimpleBytes {
             }
             finally { $fs.Dispose() }
         }
-        catch [System.IO.FileNotFoundException] { throw }
-        catch [System.IO.DirectoryNotFoundException] { throw }
-        catch [System.IO.IOException] {
-            if ($attempt -eq $Retries) { throw }
-            Start-Sleep -Milliseconds (100 * $attempt)
+        catch {
+            $root = Get-TrimpleRootException -ErrorRecord $_
+            $transient = ($root -is [System.IO.IOException]) -and -not ($root -is [System.IO.FileNotFoundException]) -and -not ($root -is [System.IO.DirectoryNotFoundException])
+            if (-not $transient -or $attempt -eq $Retries) { throw }
+            Start-Sleep -Milliseconds (100 * $attempt)      # e.g. Notepad or a sync client holds the file for a moment
         }
     }
 }
@@ -156,7 +164,7 @@ function Write-TrimpleBytes {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][byte[]]$Bytes,
-        [int]$Retries = 4
+        [int]$Retries = 6
     )
     $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     try {
@@ -181,23 +189,17 @@ function Write-TrimpleBytes {
             }
             return
         }
-        catch [System.IO.IOException] {
+        catch {
+            $root = Get-TrimpleRootException -ErrorRecord $_
             # File.Replace can fail after it already removed the original: never delete the only copy.
             if (-not (Test-Path -LiteralPath $Path) -and (Test-Path -LiteralPath $tmp)) {
                 [System.IO.File]::Move($tmp, $Path)
                 return
             }
             if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-            if ($attempt -eq $Retries) { throw }
+            $transient = ($root -is [System.IO.IOException]) -and -not ($root -is [System.IO.DirectoryNotFoundException])
+            if (-not $transient -or $attempt -eq $Retries) { throw }
             Start-Sleep -Milliseconds (120 * $attempt)
-        }
-        catch {
-            if (-not (Test-Path -LiteralPath $Path) -and (Test-Path -LiteralPath $tmp)) {
-                [System.IO.File]::Move($tmp, $Path)
-                return
-            }
-            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-            throw
         }
     }
 }
