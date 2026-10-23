@@ -170,6 +170,8 @@ test('9b. saving over an existing note asks first (Cancel keeps it, Replace over
     await page.waitForFunction(() => document.querySelector('.modal h3')?.textContent === 'Replace note?');
     await L.modal(page).locator('button:has-text("Replace")').click();
     await page.locator('.modal-overlay').waitFor({ state: 'detached' });
+    // the dialog closes before the save has finished (slower on Windows): wait for it to land
+    await L.waitFor(() => app.read('Home.txt').toString() === 'replacement text', { what: 'Home.txt replaced' });
     assert.equal(app.read('Home.txt').toString(), 'replacement text');
     await L.waitFor(async () => (await dirtyDots(page)) === 0, { what: 'dirty dot cleared' });
   });

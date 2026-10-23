@@ -90,7 +90,7 @@ test('13d. path traversal, absolute paths, backslashes, reserved names, colons -
   // raw URL tricks that bypass client-side encoding
   for (const raw of ['/api/file?path=../secret.txt', '/api/file?path=%2e%2e%2fsecret.txt', '/api/file?path=..%5Csecret.txt', '/../api/state', '/api/file/../../secret.txt']) {
     const r = await app.request({ path: raw });
-    assert.ok([400, 404, 301, 200].includes(r.status), raw + ' -> ' + r.status);
+    assert.ok([400, 404, 200, 301, 307, 308].includes(r.status), raw + ' -> ' + r.status); // 3xx = Go cleaning the path; the target still needs the token
     assert.ok(!r.text.includes('top secret'), raw + ' leaked the secret');
   }
   // the static handler does not serve anything outside the embedded web files

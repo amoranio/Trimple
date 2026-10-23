@@ -171,7 +171,15 @@ test('A7. lots of rapid typing, tab switching and filtering at once stays consis
 
 test('A8. many open tabs: the active tab is scrolled into view in the tab strip', async () => {
   await withApp({ setup: (d) => { for (let i = 0; i < 25; i++) fs.writeFileSync(path.join(d, `Note number ${i} with a fairly long file name.txt`), `- [ ] t${i}\r\n`); } }, async (app, page) => {
-    for (let i = 0; i < 25; i++) await page.keyboard.press('Control+o'), await page.keyboard.type(`number ${i} `), await page.keyboard.press('Enter'), await page.locator('.modal-overlay').waitFor({ state: 'detached' });
+    for (let i = 0; i < 25; i++) {
+      await page.keyboard.press('Control+o');
+      await page.locator('.modal input').waitFor();
+      await page.keyboard.type(`number ${i} `);
+      await page.locator(`.modal .pick button[data-path="Note number ${i} with a fairly long file name.txt"]`).waitFor();
+      await page.keyboard.press('Enter');
+      await page.locator('.modal-overlay').waitFor({ state: 'detached' });
+      await L.waitFor(async () => (await L.tabNames(page)).length === i + 1, { what: `tab ${i + 1} opened` });
+    }
     assert.equal((await L.tabNames(page)).length, 25);
     const info = await page.$eval('#tabs', (e) => ({ sw: e.scrollWidth, cw: e.clientWidth }));
     assert.ok(info.sw > info.cw, 'tab strip scrolls');

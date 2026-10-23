@@ -885,7 +885,7 @@ func TestAdv_NoFalsePositivesOnLegitNames(t *testing.T) {
 	e := newAdvEnv(t)
 	for _, p := range []string{
 		"a.txt", "sub dir/b.txt", "ünï.txt", "日本語.txt", "console.txt", "nullable.txt", "com10.txt", "aux1.txt", "CONOUT.txt", "my.con.txt",
-		"A.TXT", "x.TxT", "a b c.txt", "deep/er/est/n.txt", "sub//dbl.txt", "dash-underscore_1.txt", "dollar$.txt", "a,b;c.txt", "quote's.txt",
+		"B.TXT", "x.TxT", "a b c.txt", "deep/er/est/n.txt", "sub//dbl.txt", "dash-underscore_1.txt", "dollar$.txt", "a,b;c.txt", "quote's.txt",
 		"[brackets].txt", "{braces}.txt", "100%.txt", "a&b.txt", "#hash.txt", "tilde~.txt", "at@.txt", "plus+eq=.txt", "a(1).txt", "!bang.txt", "^caret.txt", "`tick`.txt",
 	} {
 		if r := e.putFile("path", p, "text", "ok "+p, "create", true); r.Code != 200 {
@@ -1905,7 +1905,7 @@ func TestAdv_NotepadStub(t *testing.T) {
 	if r := e.send("POST", "/api/notepad", jb("path", "n.txt")); r.Code != 200 {
 		t.Errorf("%s", r)
 	}
-	if len(*calls) != 1 || (*calls)[0] != e.inRoot("n.txt") {
+	if len(*calls) != 1 || !sameFile((*calls)[0], e.inRoot("n.txt")) { // the server reports the real (long) path, the temp dir may be an 8.3 short one
 		t.Errorf("calls=%v want [%s]", *calls, e.inRoot("n.txt"))
 	}
 	if r := e.send("POST", "/api/notepad", jb("path", "missing.txt")); r.Code != 404 || len(*calls) != 1 {
@@ -2824,4 +2824,10 @@ func TestAdv_RealSocketGuards(t *testing.T) {
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Errorf("incomplete request header not timed out within 8s (ReadHeaderTimeout is 5s)")
 	}
+}
+
+func sameFile(a, b string) bool {
+	fa, err1 := os.Stat(a)
+	fb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
 }
