@@ -1,0 +1,12 @@
+{
+  "name": "trimple-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright end-to-end tests for the Trimple executable",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 --test-timeout=120000 \"tests/*.test.js\""
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}

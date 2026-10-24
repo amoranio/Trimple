@@ -1,0 +1,7 @@
+# Work log
+
+- [ ] Write Q3 report !1 #work
+- [ ] Review pull requests !2 #work #dev
+- [x] Send invoice to supplier #admin
+- [ ] Book offsite venue !3 #work
+Plain note line that is not a task.

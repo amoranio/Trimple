@@ -1,3 +1,9 @@
 Trimple.settings.json
 Trimple.log
+trimple.log
 *.trimple-tmp
+/Trimple.exe
+/trimple
+/dist/
+/e2e/node_modules/
+/e2e/test-results/
